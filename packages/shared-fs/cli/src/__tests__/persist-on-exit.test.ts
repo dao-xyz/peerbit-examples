@@ -1,9 +1,11 @@
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
     FileVersion,
     Peerbit,
@@ -869,5 +871,208 @@ describe("mount --persist-on-exit over real TCP", () => {
             ),
         ]);
         expect(performance.now() - requested).toBeLessThan(FENCE_MS);
+    });
+});
+
+describe("peerbit-fs mount as a process", () => {
+    const cliEntry = fileURLToPath(new URL("../bin.ts", import.meta.url));
+    const cliDirectory = fileURLToPath(new URL("../../", import.meta.url));
+    const libraryEsm = new URL(
+        "../../node_modules/@peerbit/shared-fs/lib/esm/",
+        import.meta.url
+    );
+    // Windows cannot spawn a script: the mount starts a .mjs adapter with node.
+    const scriptAdapters = `data:text/javascript,${encodeURIComponent(`
+        import childProcess from "node:child_process";
+        import { syncBuiltinESMExports } from "node:module";
+        const spawn = childProcess.spawn;
+        childProcess.spawn = (command, args, options) =>
+            command.endsWith(".mjs")
+                ? spawn(process.execPath, [command, ...args], options)
+                : spawn(command, args, options);
+        syncBuiltinESMExports();
+    `)}`;
+    // A stand-in for the native adapter, no FUSE: it writes through the
+    // mount's IPC as an adapter does, leaves /open.txt open, then is ready.
+    const standInAdapter = `
+        import { once } from "node:events";
+        import { createConnection } from "node:net";
+        const ipc = (name) => import(new URL(name, ${JSON.stringify(libraryEsm.href)}).href);
+        const { BoundedIpcByteReader } = await ipc("ipc-byte-reader.js");
+        const v2 = await ipc("ipc-v2.js");
+        const endpoint = process.argv[process.argv.indexOf("--endpoint") + 1];
+        const tcp = endpoint.startsWith("tcp://") && new URL(endpoint);
+        const socket = tcp
+            ? createConnection({ host: tcp.hostname, port: Number(tcp.port) })
+            : createConnection(endpoint);
+        await once(socket, "connect");
+        // Gone with the mount, also when the mount is killed.
+        socket.on("error", () => {}).on("close", () => process.exit(0));
+        const limit = 1 << 26;
+        const reader = new BoundedIpcByteReader(socket, limit);
+        socket.write(JSON.stringify({ id: 0, op: v2.SHARED_FS_IPC_NEGOTIATE_OP, args: [{
+            protocol: v2.SHARED_FS_IPC_PROTOCOL, versions: [2], nonce: "stand-in",
+            token: process.env.PEERBIT_SHARED_FS_IPC_TOKEN,
+            maxRequestFrameBytes: limit, maxResponseFrameBytes: limit,
+        }] }) + "\\n");
+        const limits = JSON.parse(String(await reader.readLine())).result;
+        let id = 1;
+        const call = async (op, args, body = new Uint8Array(0)) => {
+            await v2.writeIpcV2Frame(socket, v2.encodeIpcV2Frame(
+                v2.IpcV2FrameKind.Request, { id: id++, op, args }, body,
+                limits.maxRequestFrameBytes, limits.maxMetadataBytes));
+            const frame = await v2.readIpcV2Frame(reader, v2.IpcV2FrameKind.Response,
+                limits.maxResponseFrameBytes, limits.maxMetadataBytes);
+            const response = JSON.parse(String(frame.metadata));
+            if (!response.ok) throw new Error(op + ": " + response.error?.message);
+            return response.result;
+        };
+        for (const name of ["/closed.txt", "/open.txt"]) {
+            const flags = { write: true, create: true, truncate: true };
+            const handle = await call("open", [name, flags]);
+            const bytes = new TextEncoder().encode(name);
+            await call("write", [handle, { $bytes: null }, 0], bytes);
+            if (name === "/closed.txt") await call("release", [handle]);
+        }
+        process.stdout.write("peerbit-shared-fs-native ready\\n");
+        setInterval(() => {}, 1 << 30);
+    `;
+
+    it("stops on a `shutdown` line on its stdin: saves the open file, waits for the replica, exits 0", async () => {
+        const base = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-mount-process-")
+        );
+        let receiverPeer: Peerbit | undefined;
+        let child: ReturnType<typeof spawn> | undefined;
+        let exited: Promise<number | null> = Promise.resolve(null);
+        try {
+            const log = vi.spyOn(console, "log").mockImplementation(() => {});
+            await runCli(["create", "--directory", path.join(base, "writer")]);
+            const address = String(log.mock.calls.at(-1)?.[0]);
+            log.mockRestore();
+            receiverPeer = await Peerbit.create({
+                directory: path.join(base, "receiver"),
+                libp2p: { addresses: { listen: ["/ip4/127.0.0.1/tcp/0"] } },
+            });
+            const adapter = path.join(base, "adapter.mjs");
+            await fs.writeFile(adapter, standInAdapter);
+            await fs.mkdir(path.join(base, "mnt"));
+
+            child = spawn(
+                process.execPath,
+                [
+                    "--no-warnings",
+                    "--import",
+                    "tsx",
+                    "--import",
+                    scriptAdapters,
+                    cliEntry,
+                    "mount",
+                    address,
+                    path.join(base, "mnt"),
+                    "--directory",
+                    path.join(base, "writer"),
+                    "--peer",
+                    receiverPeer.getMultiaddrs()[0].toString(),
+                    "--native-adapter",
+                    adapter,
+                    "--persist-timeout-ms",
+                    String(STEP_MS),
+                ],
+                { cwd: cliDirectory, env: { ...process.env, FORCE_COLOR: "0" } }
+            );
+            const output: string[] = [];
+            const errors: string[] = [];
+            let wake = () => {};
+            for (const [stream, lines] of [
+                [child.stdout!, output],
+                [child.stderr!, errors],
+            ] as const) {
+                let rest = "";
+                stream.on("data", (chunk) => {
+                    const parts = (rest + chunk).split(/\r?\n/);
+                    rest = parts.pop()!;
+                    lines.push(...parts);
+                    wake();
+                });
+            }
+            let code: number | null | undefined;
+            exited = new Promise((resolve) =>
+                child!.once("exit", (value) => {
+                    resolve((code = value));
+                    wake();
+                })
+            );
+            await within(
+                (async () => {
+                    while (!output.some((line) => line.startsWith("Mounted ")))
+                        await new Promise<void>((resolve) => {
+                            if (code !== undefined)
+                                throw new Error(errors.join("\n"));
+                            wake = resolve;
+                        });
+                })(),
+                "the mount is up",
+                FENCE_MS
+            );
+
+            // The receiver holds /closed.txt: the writer saw it join.
+            const receiver = await within(
+                (async () => {
+                    const receiver = await openSharedFs({
+                        peerbit: receiverPeer!,
+                        address,
+                        allowPartialWrites: true,
+                        remoteChunkFetch: false,
+                        machineLabel: "receiver",
+                        replicate: { factor: 1 },
+                        bootstrap: false,
+                        gc: false,
+                    });
+                    await new Promise<void>((resolve) => {
+                        const events = receiver.program.entries.events;
+                        const check = async () => {
+                            if (await receiver.readFile("/closed.txt")) {
+                                events.removeEventListener("change", check);
+                                resolve();
+                            }
+                        };
+                        events.addEventListener("change", check);
+                        void check();
+                    });
+                    return receiver;
+                })(),
+                "the receiver opens and holds /closed.txt"
+            );
+
+            // As a supervisor on Windows asks; the pipe stays open.
+            child.stdin!.write("shutdown\r\n");
+            expect(
+                await within(exited, "the mount exits", FENCE_MS),
+                errors.join("\n")
+            ).toBe(0);
+            expect(persistLines(errors)).toEqual([
+                expect.stringMatching(
+                    /^persist-on-exit: waiting up to 20000 ms for receipts for \d+ entries$/
+                ),
+                expect.stringMatching(
+                    /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
+                ),
+            ]);
+            // Drained at the stop and fenced: here with the writer gone.
+            expect(text(await receiver.readFile("/open.txt"))).toBe(
+                "/open.txt"
+            );
+        } finally {
+            child?.kill("SIGKILL");
+            await within(exited, "the mount is gone").catch(() => {});
+            await receiverPeer?.stop();
+            await fs.rm(base, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 200,
+            });
+        }
     });
 });
