@@ -128,29 +128,133 @@ const outcomesOf = async (reads: Record<string, Promise<unknown>>) =>
         )
     );
 
+/**
+ * When each phase of a long test began, for its failure message: a vitest
+ * timeout names only its budget. `enter` begins the next phase, or throws
+ * once `signal` aborted: vitest aborts a test's signal when the test times
+ * out and does not stop its body, which would otherwise go on.
+ */
+const phaseLog = (signal: AbortSignal) => {
+    const start = performance.now();
+    const phases: Array<{ name: string; at: number }> = [];
+    const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+    const summary = () => {
+        const now = performance.now() - start;
+        return phases
+            .map(({ name, at }, i) => {
+                const end = phases[i + 1]?.at;
+                return `${name} at ${seconds(at)} (${end === undefined ? `${seconds(now - at)}, unfinished` : seconds(end - at)})`;
+            })
+            .join("; ");
+    };
+    const noted = new WeakSet<Error>();
+    /** `error`, its message ending in the phases so far. */
+    const note = (error: unknown) => {
+        if (error instanceof Error && !noted.has(error)) {
+            noted.add(error);
+            const message = error.message;
+            error.message += `\nphases: ${summary()}`;
+            error.stack = error.stack?.replace(message, () => error.message);
+        }
+        return error;
+    };
+    // The timeout aborts the signal with the error it then reports, so the
+    // phases reach the timeout's own message.
+    signal.addEventListener("abort", () => note(signal.reason), {
+        once: true,
+    });
+    return {
+        enter: (name: string) => {
+            signal.throwIfAborted();
+            phases.push({ name, at: performance.now() - start });
+        },
+        note,
+    };
+};
+
 describe("shared fs large reopen scans", () => {
     const peers: Peerbit[] = [];
     const roots: string[] = [];
+    /**
+     * Peer creations and stops in flight. A test that timed out keeps
+     * running, so afterEach waits for them before it stops the peers and
+     * removes their directory: Windows refuses to delete a file a running
+     * peer holds open (EBUSY), and a peer created after afterEach ran would
+     * never be stopped.
+     */
+    const inFlight = new Set<Promise<unknown>>();
+    const track = <T>(work: Promise<T>) => {
+        inFlight.add(work);
+        const settled = () => inFlight.delete(work);
+        work.then(settled, settled);
+        return work;
+    };
 
     afterEach(async () => {
+        await Promise.allSettled([...inFlight]);
         await stopTestPeers(peers);
         await Promise.all(
-            roots
-                .splice(0)
-                .map((root) => rm(root, { recursive: true, force: true }))
+            roots.splice(0).map((root) =>
+                // Windows may release a stopped peer's files a moment late.
+                rm(root, {
+                    recursive: true,
+                    force: true,
+                    maxRetries: 10,
+                    retryDelay: 200,
+                })
+            )
         );
     });
+
+    /**
+     * A peer afterEach stops however the test ends: it joins `peers` as
+     * soon as it exists, and afterEach waits for a creation in flight.
+     * Refused once `signal` aborted (the test timed out); a creation that
+     * ends after that hands the body the abort, not the peer.
+     */
+    const createPeer = (signal: AbortSignal, directory: string) => {
+        signal.throwIfAborted();
+        return track(
+            Peerbit.create({ directory }).then((peer) => {
+                peers.push(peer);
+                signal.throwIfAborted();
+                return peer;
+            })
+        );
+    };
+
+    /** Stops `peer`; afterEach waits for this stop instead of a second. */
+    const stopPeer = (peer: Peerbit) => {
+        peers.splice(peers.indexOf(peer), 1);
+        return track(peer.stop());
+    };
 
     // Windows runners spend most of this test in the 300-file writeBatch:
     // 46-89 s against about 2 s on Linux. 0.16.6 measured the same (38-114 s
     // for the whole test, 2026-10-12), so the default 120 s left no room.
-    it("reads every index row once across a cold reopen, a snapshot and a GC plan", async () => {
+    it("reads every index row once across a cold reopen, a snapshot and a GC plan", async ({
+        signal,
+    }) => {
+        const phase = phaseLog(signal);
+        try {
+            await readsEveryRowOnce(signal, phase.enter);
+        } catch (error) {
+            throw phase.note(error);
+        }
+    }, 300_000);
+
+    /** The body of the test above; `phase` names each step as it begins. */
+    async function readsEveryRowOnce(
+        signal: AbortSignal,
+        phase: (name: string) => void
+    ) {
+        phase("create the creator");
         const root = await mkdtemp(join(tmpdir(), "shared-fs-reopen-scans-"));
         roots.push(root);
         const directory = join(root, "peer");
 
-        const creatorPeer = await Peerbit.create({ directory });
-        peers.push(creatorPeer);
+        const creatorPeer = await createPeer(signal, directory);
+        phase("open the creator");
         const creator = await openSharedFs({
             peerbit: creatorPeer,
             machineLabel: "scan-creator",
@@ -160,6 +264,7 @@ describe("shared fs large reopen scans", () => {
             path: `/src/d${file % 7}/f${file}.ts`,
             content: `export const value${file} = ${file};\n`,
         }));
+        phase(`write ${FILES} files`);
         const batch = await creator.writeBatch(files);
         expect(batch.results.filter(Boolean)).toHaveLength(FILES);
         const address = creator.address;
@@ -167,13 +272,13 @@ describe("shared fs large reopen scans", () => {
             (creator.program as any).entries.index.index,
             "iterate"
         );
-        peers.splice(peers.indexOf(creatorPeer), 1);
-        await creatorPeer.stop();
+        phase("stop the creator");
+        await stopPeer(creatorPeer);
 
         const reads = countIndexReads(indexProto);
         try {
-            const peer = await Peerbit.create({ directory });
-            peers.push(peer);
+            phase("reopen");
+            const peer = await createPeer(signal, directory);
             const fs = await openSharedFs({
                 peerbit: peer,
                 address,
@@ -188,10 +293,12 @@ describe("shared fs large reopen scans", () => {
             expect(indexRows).toBeGreaterThan(3 * FILES);
 
             const opened = reads.of(index);
+            phase("snapshot");
             const snapshot = await fs.snapshotWrite();
             expect(snapshot.docs).toBeGreaterThan(BigInt(2 * FILES));
             const afterSnapshot = reads.of(index);
             const gcScansFrom = reads.scans.length;
+            phase("GC plan");
             const gcReport = await fs.collectGarbage({
                 dryRun: true,
                 settleMs: 0,
@@ -253,6 +360,7 @@ describe("shared fs large reopen scans", () => {
             // Scans larger than one read page continue across pages,
             // whether the last page is full (the page divides the kind) or
             // short, and match a single read.
+            phase("paged scans");
             const program = fs.program as any;
             const scanClass = program.constructor;
             const defaultPages = {
@@ -317,6 +425,7 @@ describe("shared fs large reopen scans", () => {
             // The reopen content probe asks each content kind for one row
             // through the kind index, never one Or across the kinds, which
             // the indexer plans as a sorted union of every content row.
+            phase("content probe");
             const probeIterates: unknown[] = [];
             const iterate = index.iterate;
             index.iterate = function (this: object, ...args: any[]) {
@@ -332,7 +441,7 @@ describe("shared fs large reopen scans", () => {
         } finally {
             reads.restore();
         }
-    }, 300_000);
+    }
 
     it("the reopen content probe fails closed while the index is closing", async () => {
         const peer = await Peerbit.create();
