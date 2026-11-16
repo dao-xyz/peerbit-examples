@@ -416,6 +416,20 @@ soon a mount sees changes made elsewhere: by other peers, and by the daemon's
 own conflict and naming merges. Changes made through the mount itself are
 visible at once on every platform.
 
+A file another peer renames, replaces or deletes while it is open here keeps
+what was written through the open descriptors: `flush`, `fsync` and close save
+it to the same file, at its new path after a rename. After a replace or delete
+the other peer's change stays visible and the save is a `delete-vs-edit`
+naming conflict. `peerbit-fs resolve-naming-conflict` with `move --to <path>`
+brings it back; if the other peer had also edited the file before deleting it,
+`peerbit-fs conflicts` then lists both versions. `restore` brings it back only
+at its old path and shows just one of two such versions. If the save fails,
+`flush` or `fsync` returns the error instead of success and the bytes stay
+buffered. Not covered yet: a new file that was never saved. If another peer
+renames, removes or replaces a directory on its path before the first save,
+that save fails (`ENOENT`, `ENOTDIR` or `EAGAIN`) and what was written to the
+file is lost.
+
 Linux (FUSE 3) mounts with
 `-o entry_timeout=0.1,attr_timeout=0,negative_timeout=0`. The kernel remembers
 which file a name leads to for at most 0.1 s and caches neither attributes,

@@ -38,6 +38,50 @@ const namingEvent = (properties: {
         machineLabel: "race",
     });
 
+/**
+ * The bytes of a save over another peer's delete of `nodeId`: the delete
+ * stays visible, the save is the one version its `delete-vs-edit` lists, and
+ * `action` brings it back at `path`.
+ */
+const recovered = async (
+    fs: SharedFsHandleType,
+    nodeId: string,
+    action: { type: "restore" } | { type: "move"; to: string },
+    path: string
+) => {
+    const conflict = (await fs.namingConflicts()).find(
+        (candidate) =>
+            candidate.type === "delete-vs-edit" && candidate.nodeId === nodeId
+    );
+    expect(conflict?.recoverableVersionIds).toHaveLength(1);
+    await fs.resolveNamingConflict(nodeId, action);
+    return decode(await fs.readFile(path));
+};
+
+/** The bytes of every version listed in the content conflict at `path`. */
+const conflictBytes = async (fs: SharedFsHandleType, path: string) => {
+    const [conflict] = await fs.conflicts(path);
+    const bytes = await Promise.all(
+        (conflict?.versions ?? []).map(async (version) =>
+            decode(await fs.readVersion(path, version.id))
+        )
+    );
+    return bytes.sort();
+};
+
+/** `versionId` is unavailable here (not replicated, or retired) until restored. */
+const withoutVersion = (fs: SharedFsHandleType, versionId: string) => {
+    const program = fs.program as any;
+    const getDocument = program.getDocument.bind(program);
+    return vi
+        .spyOn(program, "getDocument")
+        .mockImplementation((id: unknown, ...rest: unknown[]) =>
+            id === versionId
+                ? Promise.resolve(undefined)
+                : getDocument(id, ...rest)
+        );
+};
+
 const exactTarget = (
     fs: SharedFsHandleType,
     overrides: Partial<SharedFsMountBackendTarget> = {}
@@ -45,6 +89,8 @@ const exactTarget = (
     mutateNamespaceForMount: (mutation) => fs.mutateNamespaceForMount(mutation),
     readVersionForMount: (path, id) => fs.readVersionForMount(path, id),
     writeFile: (path, content, options) => fs.writeFile(path, content, options),
+    writeNodeForMount: (nodeId, path, content, options) =>
+        fs.writeNodeForMount(nodeId, path, content, options),
     setMetadata: (path, patch, options) => fs.setMetadata(path, patch, options),
     mkdir: (path) => fs.mkdir(path),
     list: (path) => fs.list(path),
@@ -1424,11 +1470,19 @@ describe("node-guarded mount namespace", () => {
         await backend.flush(handleA);
         await backend.release(handleA);
         // Opening node B detached node A, and restoring A later must never
-        // reattach either quarantined state to a pathname.
+        // reattach either detached state to a pathname: each saves by node.
         expect(writeFile).not.toHaveBeenCalled();
         expect(
             new TextDecoder().decode(await fs.readFile("/moved/child.txt"))
-        ).toBe("aaaaaa");
+        ).toBe("valid-a");
+        expect(
+            await recovered(
+                fs,
+                nodeB.nodeId,
+                { type: "move", to: "/recovered.txt" },
+                "/recovered.txt"
+            )
+        ).toBe("stale-b");
     });
 
     it("preserves a dirty fd after a deterministic capable unlink rejection", async () => {
@@ -1809,8 +1863,10 @@ describe("node-guarded mount namespace", () => {
         await backend.flush(handle);
         await backend.fsync(handle);
         await backend.release(handle);
+        // This mount's own unlink: the bytes never commit, not even by node.
         expect(writeFile).not.toHaveBeenCalled();
         expect(await fs.stat("/file.txt")).toBeUndefined();
+        expect(await fs.namingConflicts()).toEqual([]);
     });
 
     it("ignores an old detached fd after path recreation and later guarded mutations", async () => {
@@ -1877,6 +1933,7 @@ describe("node-guarded mount namespace", () => {
             new TextDecoder().decode(await fs.readFile("/destination.txt"))
         ).toBe("moved!");
         expect(await fs.stat("/source.txt")).toBeUndefined();
+        expect(await fs.namingConflicts()).toEqual([]);
     });
 
     it("quarantines dirty handles when a capable result is malformed after mutation", async () => {
@@ -1905,10 +1962,11 @@ describe("node-guarded mount namespace", () => {
         expect(await fs.stat("/destination.txt")).toBeDefined();
         await backend.flush(handle);
         await backend.release(handle);
+        // The detached handle saves by node, wherever the move left it.
         expect(writeFile).not.toHaveBeenCalled();
         expect(
             new TextDecoder().decode(await fs.readFile("/destination.txt"))
-        ).toBe("source");
+        ).toBe("dirty!");
     });
 
     it("keeps an immutable borrowed commit stable after descriptor detach", async () => {
@@ -1939,6 +1997,7 @@ describe("node-guarded mount namespace", () => {
     it("fails closed when guarded unlink or rename mutates then rejects", async () => {
         await fs.writeFile("/throw-unlink.txt", "unlink");
         await fs.writeFile("/throw-source.txt", "source");
+        const unlinked = (await fs.stat("/throw-unlink.txt"))!.nodeId;
         const writeFile = vi.fn((path, content, options) =>
             fs.writeFile(path, content, options)
         );
@@ -1971,16 +2030,27 @@ describe("node-guarded mount namespace", () => {
         await Promise.all([backend.flush(removed), backend.flush(moved)]);
         await Promise.all([backend.release(removed), backend.release(moved)]);
 
+        // Neither outcome is known, so neither descriptor counts as
+        // unlinked: both save by node and keep their bytes.
         expect(writeFile).not.toHaveBeenCalled();
         expect(await fs.stat("/throw-unlink.txt")).toBeUndefined();
         expect(await fs.stat("/throw-source.txt")).toBeUndefined();
         expect(decode(await fs.readFile("/throw-destination.txt"))).toBe(
-            "source"
+            "stale!"
         );
+        expect(
+            await recovered(
+                fs,
+                unlinked,
+                { type: "restore" },
+                "/throw-unlink.txt"
+            )
+        ).toBe("stale!");
     });
 
     it("reconciles a dirty old state before opening a remote replacement", async () => {
         await fs.writeFile("/remote-replacement.txt", "node-a");
+        const nodeA = (await fs.stat("/remote-replacement.txt"))!.nodeId;
         const writeFile = vi.fn((path, content, options) =>
             fs.writeFile(path, content, options)
         );
@@ -2007,14 +2077,24 @@ describe("node-guarded mount namespace", () => {
             backend.release(replacement),
         ]);
 
+        // The save went to node A, never through the replacement's path.
         expect(writeFile).not.toHaveBeenCalled();
         expect(decode(await fs.readFile("/remote-replacement.txt"))).toBe(
             "new"
         );
+        expect(
+            await recovered(
+                fs,
+                nodeA,
+                { type: "move", to: "/recovered.txt" },
+                "/recovered.txt"
+            )
+        ).toBe("stale!");
     });
 
     it("clears a dirty overlay when a fresh open observes remote removal", async () => {
         await fs.writeFile("/remote-removal.txt", "node-a");
+        const nodeA = (await fs.stat("/remote-removal.txt"))!.nodeId;
         const writeFile = vi.fn((path, content, options) =>
             fs.writeFile(path, content, options)
         );
@@ -2040,15 +2120,27 @@ describe("node-guarded mount namespace", () => {
 
         expect(writeFile).not.toHaveBeenCalled();
         expect(await fs.stat("/remote-removal.txt")).toBeUndefined();
+        expect(
+            await recovered(
+                fs,
+                nodeA,
+                { type: "restore" },
+                "/remote-removal.txt"
+            )
+        ).toBe("stale!");
     });
 
     it("detaches an old path state before opening the same remotely moved node", async () => {
         await fs.writeFile("/remote-from.txt", "node-a");
+        const nodeA = (await fs.stat("/remote-from.txt"))!.nodeId;
         const writeFile = vi.fn((path, content, options) =>
             fs.writeFile(path, content, options)
         );
+        const writeNodeForMount = vi.fn((nodeId, path, content, options) =>
+            fs.writeNodeForMount(nodeId, path, content, options)
+        );
         const backend = createSharedFsMountBackend(
-            exactTarget(fs, { writeFile })
+            exactTarget(fs, { writeFile, writeNodeForMount })
         );
         const oldHandle = await backend.open("/remote-from.txt", {
             read: true,
@@ -2071,13 +2163,102 @@ describe("node-guarded mount namespace", () => {
         await backend.flush(oldHandle);
         await backend.release(oldHandle);
 
+        // The old state saves by node, never through either path: both
+        // saves of the moved node survive at its new path.
         expect(writeFile).toHaveBeenCalledOnce();
         expect(writeFile.mock.calls[0][0]).toBe("/remote-to.txt");
-        expect(decode(await fs.readFile("/remote-to.txt"))).toBe("fresh!");
+        expect(writeNodeForMount).toHaveBeenCalledOnce();
+        expect(writeNodeForMount.mock.calls[0].slice(0, 2)).toEqual([
+            nodeA,
+            "/remote-from.txt",
+        ]);
+        expect(await fs.stat("/remote-from.txt")).toBeUndefined();
+        expect(await conflictBytes(fs, "/remote-to.txt")).toEqual([
+            "fresh!",
+            "local!",
+        ]);
+    });
+
+    it("fails a by-node save with EIO and keeps the bytes on a target without writeNodeForMount", async () => {
+        await fs.writeFile("/no-capability.txt", "node-a");
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeNodeForMount: undefined })
+        );
+        const handle = await backend.open("/no-capability.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("stale!"), 0);
+        await fs.rm("/no-capability.txt");
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+        });
+        expect(decode(await backend.read(handle, 32, 0))).toBe("stale!");
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EIO",
+        });
+        expect(await fs.namingConflicts()).toEqual([]);
+    });
+
+    it("keeps a state at its path while the version its buffer builds on is unavailable", async () => {
+        await fs.writeFile("/base-gone.txt", "base");
+        const base = (await fs.stat("/base-gone.txt"))!.versionId!;
+        const writeNodeForMount = vi.fn((nodeId, path, content, options) =>
+            fs.writeNodeForMount(nodeId, path, content, options)
+        );
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeNodeForMount })
+        );
+        const handle = await backend.open("/base-gone.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("local!"), 0);
+        const unavailable = withoutVersion(fs, base);
+
+        // The path still names the node: no namespace change, so the state
+        // stays attached and dirty, and the fence fails with EIO.
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+        });
+        expect((await backend.getattr("/base-gone.txt")).size).toBe(6);
+        unavailable.mockRestore();
+        const sibling = await backend.open("/base-gone.txt", { read: true });
+        expect(decode(await backend.read(sibling, 32, 0))).toBe("local!");
+        await backend.flush(handle);
+        await backend.release(sibling);
+        await backend.release(handle);
+        expect(writeNodeForMount).not.toHaveBeenCalled();
+        expect(decode(await fs.readFile("/base-gone.txt"))).toBe("local!");
+    });
+
+    it("fails a by-node save with EIO while its base version is unavailable", async () => {
+        await fs.writeFile("/base-gone.txt", "base");
+        const { nodeId, versionId } = (await fs.stat("/base-gone.txt"))!;
+        const backend = createSharedFsMountBackend(exactTarget(fs));
+        const handle = await backend.open("/base-gone.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("local!"), 0);
+        await fs.rm("/base-gone.txt");
+        const unavailable = withoutVersion(fs, versionId!);
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EIO",
+        });
+        expect(decode(await backend.read(handle, 32, 0))).toBe("local!");
+        unavailable.mockRestore();
+        await backend.release(handle);
+        expect(
+            await recovered(fs, nodeId, { type: "restore" }, "/base-gone.txt")
+        ).toBe("local!");
     });
 
     it("does not detach a replaced state while its commit is in flight", async () => {
         await fs.writeFile("/commit-reconcile.txt", "node-a");
+        const nodeA = (await fs.stat("/commit-reconcile.txt"))!.nodeId;
         const entered = deferred();
         const allowed = deferred();
         const writeFile = vi.fn(async (path, content, options) => {
@@ -2102,7 +2283,8 @@ describe("node-guarded mount namespace", () => {
             backend.open("/commit-reconcile.txt", { read: true })
         ).rejects.toMatchObject({ code: "EAGAIN" });
         allowed.resolve();
-        await expect(flushing).rejects.toMatchObject({ code: "EAGAIN" });
+        // The guarded path write finds node B; the flush saves to node A.
+        await flushing;
 
         const replacement = await backend.open("/commit-reconcile.txt", {
             read: true,
@@ -2114,7 +2296,101 @@ describe("node-guarded mount namespace", () => {
         expect(decode(await fs.readFile("/commit-reconcile.txt"))).toBe(
             "node-b"
         );
+        expect(
+            await recovered(
+                fs,
+                nodeA,
+                { type: "move", to: "/recovered.txt" },
+                "/recovered.txt"
+            )
+        ).toBe("stale!");
     });
+
+    it("keeps an old-path commit in flight when this mount unlinks the moved node", async () => {
+        await fs.writeFile("/unlink-race.txt", "node-a");
+        const nodeA = (await fs.stat("/unlink-race.txt"))!.nodeId;
+        const entered = deferred();
+        const allowed = deferred();
+        const writeFile = vi.fn(async (path, content, options) => {
+            entered.resolve();
+            await allowed.promise;
+            return fs.writeFile(path, content, options);
+        });
+        const backend = createSharedFsMountBackend(
+            exactTarget(fs, { writeFile })
+        );
+        const handle = await backend.open("/unlink-race.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, encode("stale!"), 0);
+        const flushing = backend.flush(handle);
+        await entered.promise;
+        // Another peer moves the file; this mount then unlinks it there,
+        // where it never showed these bytes.
+        await fs.rename("/unlink-race.txt", "/unlink-moved.txt");
+        await backend.unlink("/unlink-moved.txt");
+        allowed.resolve();
+
+        // The path write finds the name gone; the flush saves by node.
+        await flushing;
+        await backend.release(handle);
+        expect(writeFile).toHaveBeenCalledOnce();
+        expect(await fs.stat("/unlink-moved.txt")).toBeUndefined();
+        expect(
+            await recovered(fs, nodeA, { type: "restore" }, "/unlink-moved.txt")
+        ).toBe("stale!");
+    });
+
+    it.each(["unlinks", "renames a file over"] as const)(
+        "keeps an older descriptor's bytes when this mount %s the node another peer moved",
+        async (removal) => {
+            await fs.writeFile("/moved-from.txt", "node-a");
+            await fs.writeFile("/other.txt", "other");
+            const nodeA = (await fs.stat("/moved-from.txt"))!.nodeId;
+            const backend = createSharedFsMountBackend(exactTarget(fs));
+            const old = await backend.open("/moved-from.txt", {
+                read: true,
+                write: true,
+            });
+            await backend.write(old, encode("unseen!"), 0);
+            // Another peer moves the file. A fresh open here detaches the
+            // old state, so the moved path never shows its bytes.
+            await fs.rename("/moved-from.txt", "/moved-to.txt");
+            const fresh = await backend.open("/moved-to.txt", {
+                read: true,
+                write: true,
+            });
+            expect(decode(await backend.read(fresh, 32, 0))).toBe("node-a");
+            await backend.write(fresh, encode("shown!"), 0);
+            if (removal === "unlinks") {
+                await backend.unlink("/moved-to.txt");
+            } else {
+                await backend.rename("/other.txt", "/moved-to.txt");
+            }
+
+            // As in POSIX, what the removed path showed never commits; the
+            // old descriptor's bytes save by node, under the removal.
+            await backend.release(fresh);
+            await backend.flush(old);
+            await backend.release(old);
+            if (removal === "unlinks") {
+                expect(await fs.stat("/moved-to.txt")).toBeUndefined();
+            } else {
+                expect(decode(await fs.readFile("/moved-to.txt"))).toBe(
+                    "other"
+                );
+            }
+            expect(
+                await recovered(
+                    fs,
+                    nodeA,
+                    { type: "move", to: "/recovered.txt" },
+                    "/recovered.txt"
+                )
+            ).toBe("unseen!");
+        }
+    );
 
     it("moves one shared source state and detaches one shared replacement state", async () => {
         await fs.writeFile("/shared-source.txt", "source!");
@@ -2319,11 +2595,13 @@ describe("node-guarded mount namespace", () => {
         await backend.release(fresh);
         await Promise.all([backend.release(old), backend.release(oldSibling)]);
 
+        // The old states save by node: both saves of the node survive.
         expect(writeFile).toHaveBeenCalledOnce();
         expect(writeFile.mock.calls[0][0]).toBe("/malformed-destination.txt");
-        expect(decode(await fs.readFile("/malformed-destination.txt"))).toBe(
-            "fresh!"
-        );
+        expect(await conflictBytes(fs, "/malformed-destination.txt")).toEqual([
+            "fresh!",
+            "local!",
+        ]);
     });
 
     it("blocks rename while a sibling descriptor commits shared state", async () => {
@@ -2842,4 +3120,189 @@ describe("node-guarded mount namespace", () => {
             new TextDecoder().decode(await fs.readFile("/batched.txt"))
         ).toBe("new-batched-value");
     });
+});
+
+/**
+ * Resolves once `ready()` holds, rechecked after every document change the
+ * replica applies: replication is awaited by event, never by polling.
+ */
+const whenApplied = (fs: SharedFsHandleType, ready: () => Promise<boolean>) =>
+    new Promise<void>((resolve, reject) => {
+        const events = fs.program.entries.events;
+        let running = false;
+        let again = false;
+        let done = false;
+        const check = async () => {
+            if (done) return;
+            if (running) {
+                again = true;
+                return;
+            }
+            running = true;
+            try {
+                do {
+                    again = false;
+                    if (await ready()) {
+                        done = true;
+                        events.removeEventListener("change", check);
+                        resolve();
+                        return;
+                    }
+                } while (again);
+            } catch (error) {
+                done = true;
+                events.removeEventListener("change", check);
+                reject(error);
+            } finally {
+                running = false;
+            }
+        };
+        events.addEventListener("change", check);
+        void check();
+    });
+
+/**
+ * The bytes `fs` shows at `path` once its visible version is complete;
+ * undefined while its documents are still replicating.
+ */
+const shownBytes = async (fs: SharedFsHandleType, path: string) => {
+    try {
+        const read = await fs.readFileWithVersion(path);
+        return read && !read.substituted ? decode(read.bytes) : undefined;
+    } catch {
+        return undefined; // no complete version has arrived yet
+    }
+};
+
+describe("open files another peer renamed, replaced or deleted", () => {
+    const peers: Peerbit[] = [];
+
+    afterEach(async () => {
+        await Promise.allSettled(peers.splice(0).map((peer) => peer.stop()));
+    });
+
+    // A's dirty old state meets each change in two ways: at its fence, whose
+    // guarded path write finds the change, or first through a fresh open on
+    // A that sees the change and detaches it, so that the fence saves by node
+    // at once. Each case commits through another fence.
+    it.each([
+        ["rename", "flush", "the fence"],
+        ["delete", "fsync", "the fence"],
+        ["replace", "release", "the fence"],
+        ["rename", "release", "an open"],
+        ["delete", "flush", "an open"],
+        ["replace", "fsync", "an open"],
+    ] as const)(
+        "keeps a dirty descriptor's bytes when another peer's mount does a %s (%s, seen first by %s)",
+        async (change, fence, seenBy) => {
+            const [a, b] = [await Peerbit.create(), await Peerbit.create()];
+            peers.push(a, b);
+            await a.dial(b);
+            const fsA = await openSharedFs({ peerbit: a, machineLabel: "a" });
+            await fsA.writeFile("/open.txt", "base");
+            await fsA.writeFile("/theirs.txt", "theirs");
+            const node = (await fsA.stat("/open.txt"))!.nodeId;
+            const fsB = await openSharedFs({
+                peerbit: b,
+                address: fsA.address,
+                machineLabel: "b",
+                allowPartialWrites: true,
+            });
+            const theirs = (await fsA.stat("/theirs.txt"))!.nodeId;
+            await whenApplied(
+                fsB,
+                async () =>
+                    (await fsB.stat("/open.txt"))?.nodeId === node &&
+                    (await fsB.stat("/theirs.txt"))?.nodeId === theirs
+            );
+            const mountA = createSharedFsMountBackend(fsA);
+            const mountB = createSharedFsMountBackend(fsB);
+            const handle = await mountA.open("/open.txt", {
+                read: true,
+                write: true,
+            });
+            await mountA.write(handle, encode("local!"), 0);
+
+            if (change === "rename") {
+                await mountB.rename("/open.txt", "/moved.txt");
+            } else if (change === "delete") {
+                await mountB.unlink("/open.txt");
+            } else {
+                await mountB.rename("/theirs.txt", "/open.txt");
+            }
+            // A has the whole change: no half-applied replacement either.
+            await whenApplied(fsA, async () =>
+                change === "rename"
+                    ? (await fsA.stat("/moved.txt"))?.nodeId === node
+                    : (await fsA.stat("/open.txt"))?.nodeId ===
+                          (change === "delete" ? undefined : theirs) &&
+                      (await fsA.namingConflicts()).length === 0
+            );
+            let fresh: number | undefined;
+            if (seenBy === "an open") {
+                if (change === "delete") {
+                    await expect(
+                        mountA.open("/open.txt", { read: true })
+                    ).rejects.toMatchObject({ code: "ENOENT" });
+                } else {
+                    // It shows the node, or the replacement, without the
+                    // old descriptor's unsaved bytes.
+                    fresh = await mountA.open(
+                        change === "rename" ? "/moved.txt" : "/open.txt",
+                        { read: true }
+                    );
+                    expect(decode(await mountA.read(fresh, 32, 0))).toBe(
+                        change === "rename" ? "base" : "theirs"
+                    );
+                }
+            }
+            // The fence resolves only once the bytes are saved to the node.
+            await mountA[fence](handle);
+            if (fence !== "release") await mountA.release(handle);
+            if (fresh !== undefined) await mountA.release(fresh);
+            mountA.dispose();
+            mountB.dispose();
+
+            if (change === "rename") {
+                // They land where the other peer moved the file.
+                expect(await shownBytes(fsA, "/moved.txt")).toBe("local!");
+                await whenApplied(
+                    fsB,
+                    async () =>
+                        (await shownBytes(fsB, "/moved.txt")) === "local!"
+                );
+                expect(await fsB.stat("/open.txt")).toBeUndefined();
+                return;
+            }
+            // The other peer's delete or replacement stays visible, and the
+            // save is a delete-vs-edit it can restore.
+            const [saved] = (await fsA.namingConflicts()).find(
+                (conflict) =>
+                    conflict.type === "delete-vs-edit" &&
+                    conflict.nodeId === node
+            )!.recoverableVersionIds!;
+            await whenApplied(fsB, async () =>
+                (await fsB.namingConflicts()).some(
+                    (conflict) =>
+                        conflict.type === "delete-vs-edit" &&
+                        conflict.recoverableVersionIds?.includes(saved) === true
+                )
+            );
+            expect((await fsB.stat("/open.txt"))?.nodeId).toBe(
+                change === "delete" ? undefined : theirs
+            );
+            const restored =
+                change === "delete" ? "/open.txt" : "/recovered.txt";
+            await fsB.resolveNamingConflict(
+                node,
+                change === "delete"
+                    ? { type: "restore" }
+                    : { type: "move", to: restored }
+            );
+            await whenApplied(
+                fsB,
+                async () => (await shownBytes(fsB, restored)) === "local!"
+            );
+        }
+    );
 });

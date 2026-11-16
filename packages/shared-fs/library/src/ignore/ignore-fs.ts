@@ -183,6 +183,31 @@ export class IgnoreAwareFs extends SharedFsHandle {
     }
 
     /**
+     * Guards, as writeFile does, the path the mount last saw the node at and
+     * the path the save lands at.
+     */
+    async writeNodeForMount(
+        nodeId: string,
+        path: string,
+        source: Uint8Array,
+        options?: WriteFileOptions,
+        guard?: (path: string) => void
+    ) {
+        const rules = this.ignorePolicy.current();
+        this.guardWrite(rules, path, "writeFile");
+        return super.writeNodeForMount(
+            nodeId,
+            path,
+            source,
+            options,
+            (current) => {
+                this.guardWrite(rules, current, "writeFile");
+                guard?.(current);
+            }
+        );
+    }
+
+    /**
      * @internal This writeFile only guards the path, then forwards its
      * options unchanged, so it keeps the private mount-profile opt-in.
      */

@@ -152,6 +152,73 @@ describe("shared fs artifact ignores", () => {
         expect(decode(await fs.program.readFile("/later.tmp"))).toBe("base");
     });
 
+    it("keeps by-node mount saves behind the ignore-aware write override", async () => {
+        const peer = await createPeer();
+        const fs = (await openSharedFs({
+            peerbit: peer,
+            machineLabel: "a",
+            ignore: {},
+        })) as IgnoreAwareFs;
+        await fs.writeFile("/later.tmp", "base");
+        const backend = createSharedFsMountBackend(fs);
+        const handle = await backend.open("/later.tmp", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, new TextEncoder().encode("next"), 0);
+        // Another writer deletes the file and a fresh open observes it, so
+        // the descriptor saves by node, through writeNodeForMount.
+        await fs.program.rm("/later.tmp");
+        await expect(
+            backend.open("/later.tmp", { read: true })
+        ).rejects.toMatchObject({ code: "ENOENT" });
+
+        const events = fs.program.events as unknown as EventTarget;
+        const ignored = new Promise<void>((resolve) => {
+            const check = () => {
+                if (!fs.ignoreCheck("/later.tmp").ignored) return;
+                events.removeEventListener("ignore:rules-changed", check);
+                resolve();
+            };
+            events.addEventListener("ignore:rules-changed", check);
+        });
+        await fs.program.writeFile("/.artifactignore", "later.tmp\n");
+        await ignored;
+
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EACCES",
+        });
+        expect(await fs.program.namingConflicts()).toEqual([]);
+    });
+
+    it("refuses a by-node mount save that would land at an ignored path", async () => {
+        const peer = await createPeer();
+        const fs = (await openSharedFs({
+            peerbit: peer,
+            machineLabel: "a",
+            ignore: { patterns: ["*.tmp"] },
+        })) as IgnoreAwareFs;
+        await fs.writeFile("/kept.txt", "base");
+        const backend = createSharedFsMountBackend(fs);
+        const handle = await backend.open("/kept.txt", {
+            read: true,
+            write: true,
+        });
+        await backend.write(handle, new TextEncoder().encode("next"), 0);
+        // A writer without the rule moves the file to an ignored path.
+        await fs.program.rename("/kept.txt", "/moved.tmp");
+
+        // As a writeFile there is, the save is refused and the bytes stay.
+        await expect(backend.flush(handle)).rejects.toMatchObject({
+            code: "EACCES",
+        });
+        await expect(fs.writeFile("/moved.tmp", "next")).rejects.toMatchObject({
+            code: "EIGNORED",
+        });
+        expect(decode(await fs.program.readFile("/moved.tmp"))).toBe("base");
+        expect(decode(await backend.read(handle, 16, 0))).toBe("next");
+    });
+
     it("skips ignored batch entries explicitly under onIgnored: skip", async () => {
         const peer = await createPeer();
         const fs = await openSharedFs({
