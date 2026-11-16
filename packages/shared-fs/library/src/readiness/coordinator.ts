@@ -155,10 +155,19 @@ import {
  *   least one contained record instead (`satisfied`; O2: a donor clause
  *   would deadlock two warm peers, and W's own persisted proof is the
  *   non-vacuity). The decision (`ports.decide`) is then the host's
- *   freshness label, never a flip; it is monotone for the open, and once
- *   the host finishes the coordinator nothing is asked again (no re-check
- *   at rest). A freshness coordinator opens no qualification session:
- *   qualification is the donor clause's.
+ *   freshness label, never a flip. A freshness coordinator opens no
+ *   qualification session: qualification is the donor clause's.
+ * - **Rest (M2 PR-5a, O2 amended).** At the label the check rests
+ *   (`rest`): nothing asked or armed; records and listener stay. A late
+ *   peer (never answered: `unconfirmed`, or `left`) wakes it with a sign
+ *   of life (`wake`), handled as a running check would, and the host
+ *   withdraws its label (`onWake`) until the predicate holds again; so
+ *   do a message from a peer with no record (V2) and a trust removal.
+ *   Reachability wakes only for a sign of life no session followed
+ *   (`restSign`): a dead peer's row can read reachable while its route
+ *   stays (K11), and no timer may release it (D14). Store closes are
+ *   noted (D6). A peer that answered is asked again only in a wake: back
+ *   after it left (D4), or with a stale trust result.
  * - **Lifecycle.** Every listener is detached on `finish`/`dispose`, and
  *   every handler first checks that this coordinator is still running (as
  *   the entries change listener checks its identity: a removed listener can
@@ -299,6 +308,8 @@ export interface PeerRecord {
     reaskOnCompletion: boolean;
     /** The current session holds a header of R (R answered it). */
     headerHeld: boolean;
+    /** R answered this open (a header, `BUSY`, a refusal): sticky (PR-5a). */
+    answered: boolean;
     /**
      * The session in flight or queued is a qualification session: R is
      * `contained` and unqualified and sent a notice whose provenance
@@ -391,8 +402,8 @@ export type CoordinatorPurpose = "join" | "freshness";
 
 /**
  * `bootstrapStatus().freshness.state` (M2 PR-4). The coordinator reports
- * `unchecked`, `checking` and `fault`; the runtime adds `fresh` (held once,
- * monotone for the open) and the host `off`.
+ * `unchecked`, `checking` and `fault`; the runtime adds `fresh` (the label;
+ * a late peer withdraws it, PR-5a) and the host `off`.
  */
 export type FreshnessState =
     /**
@@ -405,9 +416,9 @@ export type FreshnessState =
      * departed ones), or on-demand and nobody asked yet.
      */
     | "unchecked"
-    /** Sessions running, a Required peer blocking, or a check in flight. */
+    /** Sessions running, a Required (or late, PR-5a) peer blocking. */
     | "checking"
-    /** The check held once; monotone for the open. */
+    /** The check held and rests. */
     | "fresh"
     /** No readiness state, scope or transport (as a join's fault). */
     | "fault";
@@ -424,6 +435,8 @@ export interface FreshnessStatus {
     silent: string[];
     /** Peers that left with rows W may lack (D4; O16). */
     gaps: string[];
+    /** Rows asked once, unanswered (not Required; asked on a sign of life). */
+    unconfirmed: string[];
     /** Why the first Required record blocks. */
     reason?: PeerReason;
     fault?: string;
@@ -515,6 +528,8 @@ export interface CoordinatorPorts {
      * throw is the observer's. Without it no reason is computed.
      */
     onProgress?(changed: readonly PeerChange[]): void;
+    /** A resting freshness check woke (PR-5a): the label goes. Synchronous. */
+    onWake?(): void;
     /**
      * The first request attempt of every session
      * (`writeReadiness.requestTimeoutMs`; `REQUEST_TIMEOUT_MS` by default,
@@ -635,6 +650,8 @@ export interface CoordinatorDebug {
     /** Discovery reads that failed (each retried on the next event). */
     discoveryFailures: number;
     phase: CoordinatorPhase;
+    /** Wakes of the resting check that withdrew the label (PR-5a). */
+    wakes: number;
     /** Trust-graph changes seen (`trustChanged`). */
     trustEpoch: number;
     /** Record trust checks in flight (4.2). */
@@ -762,7 +779,13 @@ export const describeReadiness = (status: ReadinessStatus): string => {
     }
 };
 
-export type CoordinatorPhase = "idle" | "running" | "finished" | "disposed";
+/** `resting`: a freshness check after its label (PR-5a). */
+export type CoordinatorPhase =
+    | "idle"
+    | "running"
+    | "resting"
+    | "finished"
+    | "disposed";
 
 /** Session scope states doing work after a header (S1). */
 const RECONCILING_SCOPE: ReadonlySet<SessionState> = new Set<SessionState>([
@@ -843,6 +866,8 @@ interface Entry extends PeerRecord {
     /** A record trust check is in flight; `trustAgain`: run it once more. */
     trustChecking: boolean;
     trustAgain: boolean;
+    /** A sign of life since R's last session: R's return wakes a rest. */
+    restSign: boolean;
 }
 
 export class Coordinator {
@@ -900,6 +925,7 @@ export class Coordinator {
     private finalSatisfied = false;
     private evaluations = 0;
     private dropped = 0;
+    private wakes = 0;
     /** Bumped on every trust-graph change (`trustChanged`, design 4.9). */
     private trustEpoch = 0;
     private trustChecks = 0;
@@ -961,6 +987,10 @@ export class Coordinator {
         return this.phaseValue === "running";
     }
 
+    private get resting() {
+        return this.phaseValue === "resting";
+    }
+
     /** A warm open's freshness check (M2 PR-4). */
     private get freshness() {
         return this.purpose === "freshness";
@@ -982,8 +1012,9 @@ export class Coordinator {
         this.phaseValue = "running";
         const listener = (event: TransportEvent) => {
             // A detached listener can still fire once (main-event 1.0.3-1.0.4).
-            if (this.listener !== listener || !this.running) return;
-            this.onTransport(event);
+            if (this.listener !== listener) return;
+            if (this.running) this.onTransport(event);
+            else if (this.resting) this.onRestingTransport(event);
         };
         this.listener = listener;
         // An access-controlled join opens the trust scope and reads J's
@@ -1031,7 +1062,8 @@ export class Coordinator {
      * A readiness message from signer `from` with its encoded size. Answers
      * go to that peer's session by `sessionId`; a notice is classified
      * against the peer's `openNonce`; every message is a sign of life (a
-     * peer J did not know yet becomes a record, if reachable). Never throws.
+     * peer J did not know yet becomes a record, if reachable; at rest it
+     * wakes the check unless its peer answered). Never throws.
      */
     onMessage(
         message: ReadinessMessage,
@@ -1039,7 +1071,15 @@ export class Coordinator {
         bytes: number,
         key?: PublicSignKey
     ): void {
-        if (!this.running || from === this.self) return;
+        if (from === this.self) return;
+        if (this.resting) {
+            const entry = this.entries.get(from);
+            if (!entry || this.late(entry)) {
+                this.wake(() => this.onMessage(message, from, bytes, key));
+            } else this.markLive(entry, "message", key);
+            return;
+        }
+        if (!this.running) return;
         try {
             const entry = this.entryOf(from, "message", key);
             if (!entry) {
@@ -1076,6 +1116,7 @@ export class Coordinator {
 
     /** A `StateNoticeV1` (routed by `onMessage`). */
     onNotice(notice: StateNoticeV1, from: string, key?: PublicSignKey): void {
+        if (this.resting) return this.onMessage(notice, from, 0, key);
         if (!this.running || from === this.self) return;
         try {
             const entry = this.entryOf(from, "message", key);
@@ -1109,9 +1150,16 @@ export class Coordinator {
      * again (`reopenStaleTrust`; the removal's own microtask may not have
      * run yet). The event's content is never read: a revocation may never
      * arrive as a delete (M0 P3). After `finish` it is ignored: readiness
-     * is never withdrawn.
+     * is never withdrawn. At rest only the epoch moves (a removal wakes
+     * the check: `staleTrustSoon`); a wake checks every contained record
+     * again (PR-5a).
      */
     trustChanged(): void {
+        if (this.resting) {
+            this.trustEpoch++;
+            this.trustTriggers.change++;
+            return;
+        }
         if (!this.running) return;
         this.trustEpoch++;
         this.trustTriggers.change++;
@@ -1683,12 +1731,14 @@ export class Coordinator {
             excluded: [],
             silent: [],
             gaps: [],
+            unconfirmed: [],
             requests: 0,
         };
         for (const entry of this.entries.values()) {
             const { hash, state } = entry;
             if (BLOCKING_STATES.has(state)) blocking.push(entry);
             if (state === "contained") status.contained.push(hash);
+            else if (state === "unconfirmed") status.unconfirmed.push(hash);
             else if (entry.excluded && state.startsWith("excluded-")) {
                 status.excluded.push(hash);
             }
@@ -1859,6 +1909,28 @@ export class Coordinator {
         this.end("disposed");
     }
 
+    /**
+     * The host's freshness label (PR-5a): when the predicate holds now, the
+     * check rests (sessions and queues closed; records, listener and trust
+     * sink kept). Returns whether it rests.
+     */
+    rest(): boolean {
+        if (!this.freshness || !this.running || !this.satisfied()) {
+            return false;
+        }
+        this.finalSatisfied = true;
+        this.phaseValue = "resting";
+        // After a wake, the first evaluation reports the change.
+        this.reportedSatisfied = true;
+        this.closeAll();
+        return true;
+    }
+
+    /** The label did not stand (a failed flip): running again (M9). */
+    resume(): void {
+        if (this.resting) this.phaseValue = "running";
+    }
+
     debug(): CoordinatorDebug {
         let armedTimers = 0;
         for (const session of this.owners.keys()) {
@@ -1879,6 +1951,7 @@ export class Coordinator {
             discovered: this.discovered,
             discoveryFailures: this.discoveryFailures,
             phase: this.phaseValue,
+            wakes: this.wakes,
             trustEpoch: this.trustEpoch,
             trustChecks: this.trustChecks,
             trustTriggers: { ...this.trustTriggers },
@@ -1964,6 +2037,101 @@ export class Coordinator {
         }
     }
 
+    /**
+     * A transport event at rest (PR-5a, see Rest above): a late peer's
+     * sign of life, or one of a peer J could not reach, wakes the check; a
+     * sign of life, unsubscribe or leave of a peer that answered is only
+     * noted (D6).
+     */
+    private onRestingTransport(event: TransportEvent) {
+        if (event.kind === "reachability") {
+            const left = [...this.entries.values()].filter(
+                (entry) =>
+                    entry.state === "left" &&
+                    this.late(entry) &&
+                    entry.restSign &&
+                    !entry.storeClosed &&
+                    this.readReachable(entry.hash)
+            );
+            const seen = [...this.unreachableVisible].filter(
+                ([hash]) =>
+                    !this.entries.has(hash) &&
+                    this.earlyLife.has(hash) &&
+                    this.readReachable(hash)
+            );
+            if (left.length + seen.length === 0) return;
+            return this.wake(() => {
+                for (const entry of left) this.reread(entry, true);
+                for (const [hash, at] of seen) this.connected(hash, at);
+            });
+        }
+        if (event.peer === this.self) return;
+        const entry = this.entries.get(event.peer);
+        if (
+            event.kind === "unsubscribe" ||
+            (event.kind === "replicator" && event.type === "leave")
+        ) {
+            if (event.kind === "unsubscribe") {
+                this.unreachableVisible.delete(event.peer);
+            }
+            if (!entry) return;
+            if (event.kind === "replicator") entry.via.delete("replicator");
+            else {
+                entry.via.delete("subscriber");
+                if (event.reason === "remote-unsubscribe") {
+                    entry.unsubscribed = true;
+                }
+            }
+            return this.checkVisibility(entry);
+        }
+        if (entry && !this.late(entry)) {
+            const via =
+                event.kind === "subscribe" ? "subscriber" : "replicator";
+            return this.markLive(entry, via, event.key);
+        }
+        if (entry || this.unreachableVisible.has(event.peer)) {
+            this.wake(() => this.onTransport(event));
+        }
+    }
+
+    /**
+     * `signal` handled as if running (PR-5a). If a record blocks then, stale
+     * trust is asked again and the label goes (`onWake`); else it rests.
+     */
+    private wake(signal: () => void) {
+        this.phaseValue = "running";
+        try {
+            signal();
+        } catch {
+            // Handlers never throw; the read below decides.
+        }
+        if (!this.running) return;
+        let blocking = false;
+        for (const entry of this.entries.values()) {
+            if (BLOCKING_STATES.has(entry.state)) blocking = true;
+        }
+        if (!blocking) {
+            this.phaseValue = "resting";
+            return;
+        }
+        this.wakes++;
+        this.reopenStaleTrust();
+        this.settle();
+        try {
+            this.ports.onWake?.();
+        } catch {
+            // The host's error is the host's.
+        }
+    }
+
+    /** Never answered this open and not counted (PR-5a). */
+    private late(entry: Entry): boolean {
+        return (
+            !entry.answered &&
+            (entry.state === "unconfirmed" || entry.state === "left")
+        );
+    }
+
     /** A session's terminal outcome (O- transitions). */
     protected onOutcome(session: JoinerSession, outcome: SessionOutcome): void {
         if (!this.running) return;
@@ -1974,6 +2142,9 @@ export class Coordinator {
         entry.session = undefined;
         entry.fetchWaiting = false;
         const qualifying = entry.qualifying;
+        if (outcome.kind === "busy" || outcome.kind === "refused") {
+            entry.answered = true;
+        }
         try {
             switch (outcome.kind) {
                 case "contained":
@@ -2072,7 +2243,10 @@ export class Coordinator {
         const entry = this.owners.get(session);
         // The outcome follows the states `finish` sets.
         if (!entry || entry.session !== session || session.outcome) return;
-        if (HEADER_SCOPE.has(state)) entry.headerHeld = true;
+        if (HEADER_SCOPE.has(state)) {
+            entry.headerHeld = true;
+            entry.answered = true;
+        }
         try {
             if (scope === SCOPE_TRUST_V1 && state === "contained") {
                 const own = this.liveTrust(session);
@@ -2559,7 +2733,10 @@ export class Coordinator {
         read.then(
             (replicators) => {
                 entry.visibilityRead = false;
-                if (!this.running || this.entries.get(entry.hash) !== entry) {
+                if (
+                    !(this.running || this.resting) ||
+                    this.entries.get(entry.hash) !== entry
+                ) {
                     return;
                 }
                 if (replicators.includes(entry.hash)) {
@@ -2639,6 +2816,7 @@ export class Coordinator {
             departed: false,
             reaskOnCompletion: false,
             headerHeld: false,
+            answered: false,
             qualifying: false,
             fetchWaiting: false,
             unsubscribed: false,
@@ -2650,6 +2828,7 @@ export class Coordinator {
             trustToken: 0,
             trustChecking: false,
             trustAgain: false,
+            restSign: options.live,
         };
         this.entries.set(hash, entry);
         this.enqueue(entry, this.freshInit(hash));
@@ -2665,6 +2844,7 @@ export class Coordinator {
         entry.via.add(via);
         entry.key ??= key;
         entry.live = true;
+        entry.restSign = true;
         entry.confirmOnly = false;
         entry.unsubscribed = false;
         entry.storeClosed = false;
@@ -2984,12 +3164,14 @@ export class Coordinator {
      * `reopenStaleTrust`, then `settle`, on a microtask, coalesced: never
      * from inside the tap's dispatch (a sink that closed a session there
      * would detach that session's sink mid-dispatch) or a session's call.
+     * At rest it wakes the check (PR-5a).
      */
     private staleTrustSoon() {
-        if (!this.running || this.staleTrustPending) return;
+        if (!(this.running || this.resting) || this.staleTrustPending) return;
         this.staleTrustPending = true;
         void resolved.then(() => {
             this.staleTrustPending = false;
+            if (this.resting) return this.wake(() => this.reopenStaleTrust());
             if (!this.running) return;
             try {
                 this.reopenStaleTrust();
@@ -3164,6 +3346,7 @@ export class Coordinator {
     private openSession(entry: Entry, init: SessionInit) {
         entry.chain = init;
         entry.queued = false;
+        entry.restSign = false;
         entry.headerHeld = false;
         entry.fetchWaiting = false;
         entry.sessionsOpened++;
@@ -3232,6 +3415,11 @@ export class Coordinator {
     private setFault(detail: string) {
         if (this.fault !== undefined) return;
         this.fault = detail;
+        this.closeAll();
+    }
+
+    /** Every session closes and every queue empties (records stay). */
+    private closeAll() {
         for (const entry of this.entries.values()) {
             this.closeSession(entry);
             entry.queued = false;
@@ -3246,7 +3434,8 @@ export class Coordinator {
             this.phaseValue = phase;
             return;
         }
-        this.finalSatisfied = this.satisfied();
+        // A rest kept its label's value.
+        if (!this.resting) this.finalSatisfied = this.satisfied();
         // First: every handler, the evaluation job and the continuations
         // return from now on.
         this.phaseValue = phase;
@@ -3264,12 +3453,7 @@ export class Coordinator {
         } catch {
             // As above.
         }
-        for (const entry of this.entries.values()) {
-            this.closeSession(entry);
-            entry.queued = false;
-        }
-        this.queue.length = 0;
-        this.qualifyQueue.length = 0;
+        this.closeAll();
     }
 
     /** Each scope of a session with its state. */

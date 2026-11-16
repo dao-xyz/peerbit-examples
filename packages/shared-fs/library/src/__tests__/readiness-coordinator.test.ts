@@ -8108,6 +8108,7 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
         );
         await settle();
         expect(lone.satisfied()).toBe(false);
+        // Listed (M2 PR-5a): a row asked once that never answered.
         expect(lone.freshnessView()).toEqual({
             state: "unchecked",
             required: 0,
@@ -8115,6 +8116,7 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
             excluded: [],
             silent: [],
             gaps: [],
+            unconfirmed: [silentRow.hash],
             requests: 0,
         });
         expect(decided).not.toHaveBeenCalled();
@@ -8194,6 +8196,7 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
             excluded: [],
             silent: [s.hash],
             gaps: [],
+            unconfirmed: [],
             reason: "reachable-silent",
             requests: 0,
         });
@@ -8215,45 +8218,54 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
         expect(decide).not.toHaveBeenCalled();
     });
 
-    it("77: at rest after fresh nothing is asked in hours of fake clock, whatever arrives", async () => {
+    it("77: at rest after fresh nothing is asked in hours of fake clock: network events, a new subscriber, and the messages of peers that answered", async () => {
         // Neither peer qualifies, so only the freshness predicate (no
-        // donor clause) can finish this coordinator.
+        // donor clause) can rest this coordinator.
         const { w, peers } = await worldWith([
             ["A", { provenance: GATED }],
             ["B", { provenance: GATED }],
         ]);
         const [a, b] = peers;
         await w.start();
-        // The host's label finishes the check (`ReadinessRuntime.markFresh`).
+        // The host's label rests the check (`ReadinessRuntime.noteFresh`).
         let coordinator!: Coordinator;
-        const decide = vi.fn(async () => coordinator.finish());
+        const decide = vi.fn(async () => {
+            coordinator.rest();
+        });
         coordinator = w.run({ purpose: "freshness", decide });
         expect(coordinator.debug().purpose).toBe("freshness");
-        await w.until(() => coordinator.phase === "finished", "fresh");
+        await w.until(() => coordinator.phase === "resting", "fresh");
         expect(decide).toHaveBeenCalledTimes(1);
         expect(w.record(a).qualified).toBe(false);
         await settle();
         expect(coordinator.debug().armedTimers).toBe(0);
         expect(coordinator.debug().sessions).toBe(0);
+        // Still listening, for a late peer (M2 PR-5a); none here.
+        expect(w.transport.listeners.size).toBe(1);
         const sent = w.sent.length;
         const evaluations = w.evaluations.length;
 
         await w.clock.advanceSettled(6 * HOUR);
-        // Events, a new subscriber, notices and requests change nothing.
+        // Events, a new subscriber, notices and requests change nothing (a
+        // message from a peer first seen at rest wakes the check: PR-5a).
         w.transport.emit({ kind: "reachability", source: "connect" });
         const c = await w.peer("C", { provenance: CREATOR });
         w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
         a.responder.sendNotice([w.j.key], NOTICE_REASON.WARM_FRESH);
         b.provenance = RECONCILED;
         b.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
-        w.fromPeer(c, w.request(c));
+        w.fromPeer(a, w.request(a));
         await settle();
         await w.clock.advanceSettled(6 * HOUR);
         expect(w.sent.length).toBe(sent);
         expect(w.evaluations.length).toBe(evaluations);
         expect(decide).toHaveBeenCalledTimes(1);
         expect(coordinator.record(c.hash)).toBeUndefined();
-        expect(coordinator.debug().armedTimers).toBe(0);
+        expect(coordinator.debug()).toMatchObject({
+            armedTimers: 0,
+            phase: "resting",
+            wakes: 0,
+        });
     });
 
     it("84 (caps-0 row) and 96: a fresh W says warm-fresh to an M2 asker and warm to a caps-0 one, in headers and notices alike", async () => {
@@ -8350,14 +8362,15 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
      * A real ReadinessRuntime as W: its namespace on an empty fake store,
      * its sends through `w`'s network (J's role), and the peers' messages to
      * it through `w.toJ`. Peers hold no rows, so W contains each without a
-     * pull.
+     * pull. `labelled`: the provenance reads the runtime's label, as the
+     * host's does (M2 PR-5a); otherwise the test sets it.
      */
-    const runtimeIn = async (w: World) => {
+    const runtimeIn = async (w: World, labelled = false) => {
         const logId = w.j.scope(NS).logId;
         let provenance: ProvenanceState = WARM;
         const program = {};
         optOutOfReadinessShadow(program);
-        const runtime = await ReadinessRuntime.create({
+        const runtime: ReadinessRuntime = await ReadinessRuntime.create({
             address: "readiness-freshness-test",
             stores: { namespace: logId },
             anchorHost: w.host,
@@ -8368,7 +8381,15 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
                         typeof to === "string" ? to : to.hashcode(),
                         message
                     ),
-                provenance: () => ({ ...provenance }),
+                provenance: () =>
+                    labelled
+                        ? {
+                              ...WARM,
+                              source: runtime.freshnessHeld()
+                                  ? "warm-fresh"
+                                  : "warm",
+                          }
+                        : { ...provenance },
                 timers: w.clock,
             },
         });
@@ -8446,6 +8467,7 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
             excluded: [],
             silent: [],
             gaps: [],
+            unconfirmed: [],
             requests: 0,
         });
         expect(w.sent).toEqual([]);
@@ -8643,5 +8665,944 @@ describe("readiness coordinator: freshness (M2 PR-4)", () => {
         });
         expect(bare.debug().coordinator).toBeUndefined();
         bare.disposeWithoutPersist();
+    });
+
+    /**
+     * M2 PR-5a (M2 plan 15.1, O2 amended): after the label the check rests
+     * and keeps listening; a peer that never answered it (late) wakes it
+     * with a sign of life, and only such a peer.
+     */
+    describe("late peers at rest (M2 PR-5a)", () => {
+        /**
+         * W (the world's J) with A, which answers, and C, a replicator row
+         * with no sign of life that answers nothing (still opening, or
+         * gone): C is asked once, and the label (`decide`, as
+         * `ReadinessRuntime.noteFresh`) rests the check.
+         */
+        const restingWith = async (
+            row: PeerOptions = {},
+            world?: { w: World; a: Peer; c: Peer }
+        ) => {
+            let made = world;
+            if (!made) {
+                const { w, peers } = await worldWith([
+                    ["A", { provenance: CREATOR }],
+                    ["C", { subscriber: false, replicator: true, ...row }],
+                ]);
+                made = { w, a: peers[0], c: peers[1] };
+            }
+            const { w, a, c } = made;
+            c.up = false;
+            await w.start();
+            let coordinator!: Coordinator;
+            const decide = vi.fn(async () => {
+                coordinator.rest();
+            });
+            const onWake = vi.fn();
+            coordinator = w.run({ purpose: "freshness", decide, onWake });
+            await w.until(() => w.stateOf(a) === "contained", "A contained");
+            // C holds the check for its one attempt only.
+            expect(coordinator.phase).toBe("running");
+            await w.clock.advanceSettled(REQUEST_TIMEOUT_MS);
+            await w.until(() => coordinator.phase === "resting", "W rests");
+            expect(w.clock.now).toBe(REQUEST_TIMEOUT_MS);
+            expect(opensTo(w, c)).toBe(1);
+            expect(coordinator.freshnessView()).toMatchObject({
+                required: 0,
+                contained: [a.hash],
+                unconfirmed: [c.hash],
+            });
+            expect(coordinator.debug()).toMatchObject({
+                sessions: 0,
+                armedTimers: 0,
+                wakes: 0,
+            });
+            // Still listening.
+            expect(w.transport.listeners.size).toBe(1);
+            return { w, a, c, coordinator, decide, onWake };
+        };
+
+        it("a late row's sign of life wakes the resting check: it is asked once more, W is checking until it is contained, then rests again; every kind of sign does it", async () => {
+            const signs = {
+                subscribe: (w: World, c: Peer) =>
+                    w.transport.emit({
+                        kind: "subscribe",
+                        peer: c.hash,
+                        key: c.key,
+                    }),
+                "replicator join": (w: World, c: Peer) =>
+                    w.transport.emit({
+                        kind: "replicator",
+                        type: "join",
+                        peer: c.hash,
+                        key: c.key,
+                    }),
+                "replicator change": (w: World, c: Peer) =>
+                    w.transport.emit({
+                        kind: "replicator",
+                        type: "change",
+                        peer: c.hash,
+                        key: c.key,
+                    }),
+                "readiness request": (w: World, c: Peer) =>
+                    w.coordinator!.onMessage(w.request(c), c.hash, 100, c.key),
+                notice: (w: World, c: Peer) =>
+                    w.coordinator!.onMessage(w.notice(c), c.hash, 100, c.key),
+            };
+            for (const [kind, sign] of Object.entries(signs)) {
+                const { w, a, c, coordinator, decide, onWake } =
+                    await restingWith();
+                // Hours at rest: nothing asked, nothing armed.
+                const sent = w.sent.length;
+                await w.clock.advanceSettled(HOUR);
+                expect(w.sent.length, kind).toBe(sent);
+
+                // C finished opening and shows it.
+                c.up = true;
+                sign(w, c);
+                // In the same event: awake, the label withdrawn, C asked.
+                expect(coordinator.phase, kind).toBe("running");
+                expect(onWake, kind).toHaveBeenCalledTimes(1);
+                expect(opensTo(w, c), kind).toBe(2);
+                expect(w.stateOf(c), kind).toBe("asking");
+                expect(coordinator.freshnessView(), kind).toMatchObject({
+                    state: "checking",
+                    required: 1,
+                    reason: "asked",
+                    unconfirmed: [],
+                });
+                await w.until(
+                    () => coordinator.phase === "resting",
+                    `${kind}: W rests again`
+                );
+                expect(w.stateOf(c), kind).toBe("contained");
+                expect(decide, kind).toHaveBeenCalledTimes(2);
+                expect(coordinator.freshnessView(), kind).toMatchObject({
+                    required: 0,
+                    contained: [a.hash, c.hash],
+                    unconfirmed: [],
+                });
+                // A answered once: never asked again.
+                expect(opensTo(w, a), kind).toBe(1);
+                expect(coordinator.debug(), kind).toMatchObject({
+                    wakes: 1,
+                    sessions: 0,
+                    armedTimers: 0,
+                });
+                // C answered now: its later signs change nothing.
+                const after = w.sent.length;
+                sign(w, c);
+                await settle();
+                await w.clock.advanceSettled(HOUR);
+                expect(w.sent.length, kind).toBe(after);
+                expect(onWake, kind).toHaveBeenCalledTimes(1);
+            }
+        });
+
+        it("a late row's sign of life relayed while J cannot reach it leaves it `left` and asks nothing; its return wakes the check, unless it closed the store (D6)", async () => {
+            const { w, a, c, coordinator, decide, onWake } =
+                await restingWith();
+            const sent = w.sent.length;
+            w.transport.reachable.set(c.hash, false);
+            w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+            // Live and gone: `left` with an unknown gap, resting unseen.
+            expect(w.stateOf(c)).toBe("left");
+            expect(w.record(c).gap).toEqual({ missing: "unknown" });
+            expect(coordinator.phase).toBe("resting");
+            expect(onWake).not.toHaveBeenCalled();
+            expect(coordinator.freshnessView()).toMatchObject({
+                required: 0,
+                gaps: [c.hash],
+                unconfirmed: [],
+            });
+            // A reachability event that finds C still gone changes nothing.
+            w.transport.emit({ kind: "reachability", source: "connect" });
+            await settle();
+            expect(coordinator.phase).toBe("resting");
+            expect(w.sent.length).toBe(sent);
+
+            // C closes the store (D6) while gone: its return wakes nothing.
+            w.transport.replicating.delete(c.hash);
+            w.transport.emit({
+                kind: "replicator",
+                type: "leave",
+                peer: c.hash,
+            });
+            w.transport.emit({
+                kind: "unsubscribe",
+                peer: c.hash,
+                reason: "remote-unsubscribe",
+            });
+            await w.until(() => w.record(c).storeClosed, "C closed");
+            w.transport.reachable.set(c.hash, true);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: c.hash,
+            });
+            await settle();
+            expect(coordinator.phase).toBe("resting");
+            expect(onWake).not.toHaveBeenCalled();
+            expect(w.sent.length).toBe(sent);
+
+            // Gone again, then it opens the store again: a sign of life
+            // while gone, then its return, which wakes the check.
+            w.transport.reachable.set(c.hash, false);
+            w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+            expect(w.record(c).storeClosed).toBe(false);
+            expect(w.stateOf(c)).toBe("left");
+            expect(coordinator.phase).toBe("resting");
+            c.up = true;
+            w.transport.reachable.set(c.hash, true);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: c.hash,
+            });
+            expect(onWake).toHaveBeenCalledTimes(1);
+            expect(opensTo(w, c)).toBe(2);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(c)).toBe("contained");
+            expect(w.record(c).gap).toBeUndefined();
+            expect(decide).toHaveBeenCalledTimes(2);
+            expect(opensTo(w, a)).toBe(1);
+        });
+
+        it("a dead ex-member's row holds the check for its one attempt only and costs nothing at rest but for a sign of life attributed to it, which holds the check as a hung peer does while running (K11, D14)", async () => {
+            // D's route stays (it reads reachable) and D never answers.
+            const { w, a, c: d, coordinator, onWake } = await restingWith();
+            const sent = w.sent.length;
+            for (let hour = 0; hour < 6; hour++) {
+                // Route flaps, anonymous connects, A's signs of life, a
+                // trust change, evaluations: none is D's sign of life.
+                w.transport.reachable.set(d.hash, hour % 2 === 0);
+                for (const source of [
+                    "connect",
+                    "disconnect",
+                    "unreachable",
+                ] as const) {
+                    w.transport.emit({ kind: "reachability", source });
+                    w.transport.emit({
+                        kind: "reachability",
+                        source,
+                        peer: d.hash,
+                    });
+                }
+                w.transport.emit({
+                    kind: "subscribe",
+                    peer: a.hash,
+                    key: a.key,
+                });
+                w.transport.emit({
+                    kind: "replicator",
+                    type: "change",
+                    peer: a.hash,
+                    key: a.key,
+                });
+                w.fromPeer(a, w.request(a));
+                coordinator.trustChanged();
+                coordinator.evaluate();
+                await settle();
+                await w.clock.advanceSettled(HOUR);
+            }
+            expect(w.sent.length).toBe(sent);
+            expect(onWake).not.toHaveBeenCalled();
+            expect(coordinator.debug()).toMatchObject({
+                phase: "resting",
+                wakes: 0,
+                sessions: 0,
+                armedTimers: 0,
+            });
+            expect(w.clock.armed()).toBe(0);
+            expect(coordinator.freshnessView()).toMatchObject({
+                required: 0,
+                contained: [a.hash],
+                unconfirmed: [d.hash],
+            });
+
+            // Accepted: a subscription relayed for D while its route stays
+            // is a sign of life, as while running. D gets full attempts,
+            // then holds the check with nothing armed (a hung peer) until
+            // its route goes; no timer releases it (D14).
+            w.transport.reachable.set(d.hash, true);
+            w.transport.emit({ kind: "subscribe", peer: d.hash, key: d.key });
+            expect(onWake).toHaveBeenCalledTimes(1);
+            await w.clock.advanceSettled(REQUEST_TIMEOUT_MAX_MS * 8);
+            await w.clock.advanceSettled(6 * HOUR);
+            expect(coordinator.freshnessView()).toMatchObject({
+                state: "checking",
+                required: 1,
+                silent: [d.hash],
+                reason: "reachable-silent",
+            });
+            expect(w.clock.armed()).toBe(0);
+            const opens = opensTo(w, d);
+            w.transport.reachable.set(d.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "unreachable",
+                peer: d.hash,
+            });
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(d)).toBe("left");
+            expect(opensTo(w, d)).toBe(opens);
+            expect(coordinator.debug().wakes).toBe(1);
+        });
+
+        it("a peer that answered once is never asked again at rest, contained or left with its gap, whatever it sends or however its route moves", async () => {
+            const { w, peers } = await worldWith([
+                ["A", { provenance: CREATOR }],
+                ["L", { provenance: CREATOR }],
+            ]);
+            const [a, l] = peers;
+            // A row only L holds, which J's join never gets: L answers its
+            // header, then its pull waits.
+            const [only] = w.rows([l], 1, "l-only-", 5000);
+            w.unserved.add(only.head);
+            await w.start();
+            let coordinator!: Coordinator;
+            const decide = vi.fn(async () => {
+                coordinator.rest();
+            });
+            const onWake = vi.fn();
+            coordinator = w.run({ purpose: "freshness", decide, onWake });
+            await w.until(
+                () =>
+                    w.stateOf(a) === "contained" &&
+                    w.record(l).headerHeld &&
+                    w.stateOf(l) === "reconciling",
+                "A contained, L answered"
+            );
+            // L leaves after its header: `left` with its gap (D4).
+            w.transport.reachable.set(l.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: l.hash,
+            });
+            expect(w.stateOf(l)).toBe("left");
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.record(l).answered).toBe(true);
+            expect(coordinator.freshnessView()).toMatchObject({
+                contained: [a.hash],
+                gaps: [l.hash],
+                unconfirmed: [],
+            });
+            const sent = w.sent.length;
+
+            // Back, and every sign of life from both.
+            w.transport.reachable.set(l.hash, true);
+            for (const peer of [a, l]) {
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "connect",
+                    peer: peer.hash,
+                });
+                w.transport.emit({
+                    kind: "subscribe",
+                    peer: peer.hash,
+                    key: peer.key,
+                });
+                w.transport.emit({
+                    kind: "replicator",
+                    type: "join",
+                    peer: peer.hash,
+                    key: peer.key,
+                });
+                w.fromPeer(peer, w.request(peer));
+                peer.responder.sendNotice([w.j.key], NOTICE_REASON.READY);
+            }
+            await settle();
+            await w.clock.advanceSettled(6 * HOUR);
+            expect(w.sent.length).toBe(sent);
+            expect(onWake).not.toHaveBeenCalled();
+            expect(decide).toHaveBeenCalledTimes(1);
+            expect(w.stateOf(l)).toBe("left");
+            expect(coordinator.debug()).toMatchObject({
+                phase: "resting",
+                wakes: 0,
+                armedTimers: 0,
+            });
+        });
+
+        it("on a real runtime a wake withdraws the label at once; the next label sends WARM_FRESH again and moves `ms`", async () => {
+            const { w, peers } = await worldWith(
+                [
+                    ["A", { provenance: CREATOR }],
+                    ["C", { subscriber: false, replicator: true }],
+                ],
+                0
+            );
+            const [a, c] = peers;
+            c.up = false;
+            await w.start();
+            const { runtime } = await runtimeIn(w, true);
+            const onFresh = vi.fn(async () => {
+                // The host: the label, then the notices.
+                if (runtime.noteFresh()) runtime.markFresh();
+            });
+            runtime.startFreshness({
+                transport: () => w.transport,
+                hlcProved: 0n,
+                timers: w.clock,
+                now: () => w.clock.now,
+                onFresh,
+                start: "eager",
+            });
+            const warmFreshNotices = () =>
+                w.sent.flatMap(({ message, to }) =>
+                    message instanceof StateNoticeV1 &&
+                    message.reason === NOTICE_REASON.WARM_FRESH
+                        ? [{ to, source: sourceOf(message.provenance) }]
+                        : []
+                );
+            await w.until(() => {
+                const status = runtime.freshnessStatus()!;
+                return status.contained.length === 1 && status.required === 1;
+            }, "A contained, C asked");
+            await w.clock.advanceSettled(REQUEST_TIMEOUT_MS);
+            await w.until(
+                () => runtime.freshnessStatus()?.state === "fresh",
+                "W fresh"
+            );
+            expect(runtime.freshnessStatus()).toMatchObject({
+                contained: [a.hash],
+                unconfirmed: [c.hash],
+                ms: REQUEST_TIMEOUT_MS,
+            });
+            expect(runtime.freshnessHeld()).toBe(true);
+            await settle();
+            // Every peer W had a session with, C (asked once) included.
+            expect(warmFreshNotices()).toEqual([
+                { to: a.hash, source: "warm-fresh" },
+                { to: c.hash, source: "warm-fresh" },
+            ]);
+
+            await w.clock.advanceSettled(HOUR);
+            c.up = true;
+            w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+            // In the same event: no answer or notice says warm-fresh now.
+            expect(runtime.freshnessHeld()).toBe(false);
+            expect(runtime.freshnessStatus()).toMatchObject({
+                state: "checking",
+                required: 1,
+            });
+            expect(runtime.freshnessStatus()?.ms).toBeUndefined();
+            await w.until(
+                () => runtime.freshnessStatus()?.state === "fresh",
+                "W fresh again"
+            );
+            expect(onFresh).toHaveBeenCalledTimes(2);
+            expect(runtime.freshnessStatus()).toMatchObject({
+                contained: [a.hash, c.hash],
+                unconfirmed: [],
+                ms: REQUEST_TIMEOUT_MS + HOUR,
+            });
+            await settle();
+            expect(warmFreshNotices()).toEqual([
+                { to: a.hash, source: "warm-fresh" },
+                { to: c.hash, source: "warm-fresh" },
+                { to: a.hash, source: "warm-fresh" },
+                { to: c.hash, source: "warm-fresh" },
+            ]);
+            // One OPEN to A, and C asked twice: its row, then its return.
+            expect(runtime.stats.sent.freshness.open).toBe(3);
+            // Once per label.
+            runtime.markFresh();
+            expect(warmFreshNotices()).toHaveLength(4);
+            runtime.disposeWithoutPersist();
+        });
+
+        it("a label whose flip failed is withdrawn and the check runs again: the next trigger labels, never a timer (M9)", async () => {
+            const { w, peers } = await worldWith(
+                [["A", { provenance: CREATOR }]],
+                0
+            );
+            const [a] = peers;
+            await w.start();
+            const { runtime } = await runtimeIn(w, true);
+            let failures = 1;
+            const onFresh = vi.fn(async () => {
+                if (!runtime.noteFresh()) return;
+                if (failures-- > 0) {
+                    // The requireFreshOnReopen flip's sidecar write.
+                    runtime.withdrawFresh();
+                    throw new Error("disk full");
+                }
+                runtime.markFresh();
+            });
+            const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+            try {
+                runtime.startFreshness({
+                    transport: () => w.transport,
+                    hlcProved: 0n,
+                    timers: w.clock,
+                    now: () => w.clock.now,
+                    onFresh,
+                    start: "eager",
+                });
+                await w.until(() => onFresh.mock.calls.length === 1, "decided");
+                await settle();
+                expect(runtime.freshnessHeld()).toBe(false);
+                expect(runtime.freshnessStatus()?.state).toBe("checking");
+                expect(runtime.debug().coordinator).toMatchObject({
+                    phase: "running",
+                    decisions: { started: 1, failed: 1 },
+                });
+                // No timer retries it.
+                await w.clock.advanceSettled(HOUR);
+                expect(onFresh).toHaveBeenCalledTimes(1);
+                // The next readiness event does.
+                runtime.onMessage(w.request(a), a.key);
+                await w.until(
+                    () => runtime.freshnessStatus()?.state === "fresh",
+                    "W fresh"
+                );
+                expect(onFresh).toHaveBeenCalledTimes(2);
+                expect(runtime.debug().coordinator?.phase).toBe("resting");
+            } finally {
+                warn.mockRestore();
+                runtime.disposeWithoutPersist();
+            }
+        });
+
+        it("a removal from J's trust set at rest wakes the check: the contained peer is asked again before the label returns", async () => {
+            const w = await World.create({ trust: true });
+            const a = await w.peer("A", { provenance: CREATOR });
+            const c = await w.peer("C", {
+                subscriber: false,
+                replicator: true,
+            });
+            w.rows([w.j, a, c], 4, "c");
+            w.rows([w.j, a, c], 4, "tc", 1000, TRUST);
+            w.trust!.trusted.add(a.hash);
+            w.trust!.trusted.add(c.hash);
+            // J holds one trust row of its own; `cut` removes it.
+            const [own] = w.rows([w.j], 1, "tj", 1000, TRUST);
+            const cut: Entry = {
+                head: headOf(`cut:${own.head}`),
+                scope: TRUST,
+                kind: "cut",
+                id: own.id,
+                modified: own.modified + 1n,
+                next: [own.head],
+            };
+            w.blocks.set(cut.head, cut);
+            const { coordinator, decide, onWake } = await restingWith(
+                {},
+                { w, a, c }
+            );
+            const certified = w.record(a).results.get(TRUST)!.seq;
+
+            // The removal, at rest, and its change event.
+            const trustSet = w.j.scope(TRUST);
+            const removal = trustSet.tap.epoch + 1;
+            trustSet.receive(cut);
+            coordinator.trustChanged();
+            expect(certified).toBeLessThan(removal);
+            expect(coordinator.debug().trustRemovedAt).toBe(removal);
+            // Its microtask wakes the check: A's stale trust result is
+            // asked again, and the label returns after A's new answer.
+            await w.until(
+                () =>
+                    coordinator.phase === "resting" &&
+                    decide.mock.calls.length === 2,
+                "rests again"
+            );
+            expect(onWake).toHaveBeenCalledTimes(1);
+            expect(w.stateOf(a)).toBe("contained");
+            expect(w.record(a).sessionsOpened).toBe(2);
+            expect(w.record(a).results.get(TRUST)!.seq).toBeGreaterThanOrEqual(
+                removal
+            );
+            // C, unconfirmed, is not asked for it.
+            expect(w.stateOf(c)).toBe("unconfirmed");
+            expect(opensTo(w, c)).toBe(1);
+            expect(coordinator.debug()).toMatchObject({
+                wakes: 1,
+                staleTrust: 1,
+                armedTimers: 0,
+            });
+        });
+
+        /** W (the world's J) running freshness; `decide` rests it. */
+        const freshIn = (w: World) => {
+            let coordinator!: Coordinator;
+            const decide = vi.fn(async () => {
+                coordinator.rest();
+            });
+            const onWake = vi.fn();
+            coordinator = w.run({ purpose: "freshness", decide, onWake });
+            return { coordinator, decide, onWake };
+        };
+
+        it("a readiness message from a peer first seen at rest wakes the check: W asks it once and rests again once it is contained; its subscription or replication announcement alone does not (O15), and one J cannot reach is asked once it reads reachable (V2)", async () => {
+            const { w, peers } = await worldWith([
+                ["A", { provenance: CREATOR }],
+                ["C", { subscriber: false, replicator: true }],
+                // Reopened after W's label: W saw no row or subscription.
+                ["N", { provenance: CREATOR, subscriber: false }],
+                ["M", { provenance: CREATOR, subscriber: false }],
+            ]);
+            const [a, c, n, m] = peers;
+            const [onlyN] = w.rows([n], 1, "n-only-", 7000);
+            const [onlyM] = w.rows([m], 1, "m-only-", 8000);
+            const { coordinator, decide, onWake } = await restingWith(
+                {},
+                { w, a, c }
+            );
+            const sent = w.sent.length;
+            w.transport.subscribed.set(n.hash, n.key);
+            w.transport.replicating.add(n.hash);
+            w.transport.emit({ kind: "subscribe", peer: n.hash, key: n.key });
+            w.transport.emit({
+                kind: "replicator",
+                type: "join",
+                peer: n.hash,
+                key: n.key,
+            });
+            await settle();
+            expect(coordinator.phase).toBe("resting");
+            expect(coordinator.record(n.hash)).toBeUndefined();
+            expect(w.sent.length).toBe(sent);
+
+            // N's own check asks W: N is alive now.
+            coordinator.onMessage(w.request(n), n.hash, 100, n.key);
+            expect(onWake).toHaveBeenCalledTimes(1);
+            expect(opensTo(w, n)).toBe(1);
+            expect(coordinator.freshnessView()).toMatchObject({
+                state: "checking",
+                required: 1,
+            });
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(n)).toBe("contained");
+            expect(w.jIndex().get(onlyN.id!)).toBe(onlyN.head);
+            expect(decide).toHaveBeenCalledTimes(2);
+            // Answered now: its next message is only noted.
+            coordinator.onMessage(w.request(n), n.hash, 100, n.key);
+            expect(onWake).toHaveBeenCalledTimes(1);
+
+            // M asks while J cannot reach it: nothing asked yet.
+            w.transport.reachable.set(m.hash, false);
+            coordinator.onMessage(w.request(m), m.hash, 100, m.key);
+            expect(coordinator.phase).toBe("resting");
+            expect(coordinator.record(m.hash)).toBeUndefined();
+            expect(onWake).toHaveBeenCalledTimes(1);
+            w.transport.reachable.set(m.hash, true);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: m.hash,
+            });
+            expect(onWake).toHaveBeenCalledTimes(2);
+            expect(opensTo(w, m)).toBe(1);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(m)).toBe("contained");
+            expect(w.jIndex().get(onlyM.id!)).toBe(onlyM.head);
+            expect(decide).toHaveBeenCalledTimes(3);
+            expect([a, c, n].map((peer) => opensTo(w, peer))).toEqual([
+                1, 1, 1,
+            ]);
+            expect(coordinator.debug()).toMatchObject({
+                wakes: 2,
+                sessions: 0,
+                armedTimers: 0,
+            });
+        });
+
+        it("a late peer's return after a sign of life is asked once: the sign is spent, so its route flapping costs nothing until it shows life again", async () => {
+            const { w, a, c, coordinator, decide, onWake } =
+                await restingWith();
+            // C's subscription, relayed while J cannot reach it: `left`.
+            w.transport.reachable.set(c.hash, false);
+            w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+            expect(w.stateOf(c)).toBe("left");
+            // Its route comes back: asked (C still answers nothing) ...
+            w.transport.reachable.set(c.hash, true);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: c.hash,
+            });
+            expect(onWake).toHaveBeenCalledTimes(1);
+            expect(opensTo(w, c)).toBe(2);
+            // ... and goes before C answers: `left` again, W rests.
+            w.transport.reachable.set(c.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: c.hash,
+            });
+            await w.clock.advanceSettled(REQUEST_TIMEOUT_MAX_MS * 8);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(c)).toBe("left");
+            const sent = w.sent.length;
+            for (let hour = 0; hour < 6; hour++) {
+                w.transport.reachable.set(c.hash, hour % 2 === 0);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "connect",
+                    peer: c.hash,
+                });
+                await settle();
+                await w.clock.advanceSettled(HOUR);
+            }
+            expect(w.sent.length).toBe(sent);
+            expect(onWake).toHaveBeenCalledTimes(1);
+            expect(decide).toHaveBeenCalledTimes(2);
+
+            // A new sign of life re-arms it; C is open now.
+            c.up = true;
+            w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+            w.transport.reachable.set(c.hash, true);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: c.hash,
+            });
+            expect(onWake).toHaveBeenCalledTimes(2);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(c)).toBe("contained");
+            expect([a, c].map((peer) => opensTo(w, peer))).toEqual([1, 3]);
+        });
+
+        it("reachability alone never wakes the check for a peer with no sign of life: a subscriber that left while asked, or one J could not reach (K11)", async () => {
+            const { w, peers } = await worldWith([
+                ["A", { provenance: CREATOR }],
+                ["D", {}],
+                ["X", { reachable: false }],
+            ]);
+            const [a, d, x] = peers;
+            d.up = false;
+            x.up = false;
+            await w.start();
+            const { coordinator, decide, onWake } = freshIn(w);
+            await w.until(
+                () => w.stateOf(a) === "contained" && opensTo(w, d) === 1,
+                "A contained, D asked"
+            );
+            w.transport.reachable.set(d.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: d.hash,
+            });
+            await w.clock.advanceSettled(REQUEST_TIMEOUT_MAX_MS * 8);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.record(d)).toMatchObject({
+                state: "left",
+                live: false,
+                answered: false,
+            });
+            expect(coordinator.record(x.hash)).toBeUndefined();
+            const sent = w.sent.length;
+            for (let hour = 0; hour < 6; hour++) {
+                for (const peer of [d, x]) {
+                    w.transport.reachable.set(peer.hash, hour % 2 === 0);
+                    w.transport.emit({
+                        kind: "reachability",
+                        source: "connect",
+                        peer: peer.hash,
+                    });
+                }
+                w.transport.emit({ kind: "reachability", source: "connect" });
+                await settle();
+                await w.clock.advanceSettled(HOUR);
+            }
+            expect(w.sent.length).toBe(sent);
+            expect(onWake).not.toHaveBeenCalled();
+
+            // X shows life: asked, and contained.
+            x.up = true;
+            w.transport.reachable.set(x.hash, true);
+            w.transport.emit({ kind: "subscribe", peer: x.hash, key: x.key });
+            expect(onWake).toHaveBeenCalledTimes(1);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(x)).toBe("contained");
+            expect(decide).toHaveBeenCalledTimes(2);
+            expect(opensTo(w, d)).toBe(1);
+        });
+
+        it("a peer that answered `BUSY` or refused, then left, is never asked at rest: both are answers", async () => {
+            for (const code of [ERROR_CODE.BUSY, ERROR_CODE.UNSUPPORTED]) {
+                const { w, peers } = await worldWith([
+                    ["A", { provenance: CREATOR }],
+                    ["B", { provenance: CREATOR }],
+                ]);
+                const [a, b] = peers;
+                b.refuse = { code, times: Number.POSITIVE_INFINITY };
+                await w.start();
+                const { coordinator, onWake } = freshIn(w);
+                await w.until(
+                    () =>
+                        w.stateOf(a) === "contained" &&
+                        ["busy", "refused"].includes(w.stateOf(b)!),
+                    `${code}: A contained, B answered`
+                );
+                expect(w.record(b).answered, `${code}`).toBe(true);
+                w.transport.reachable.set(b.hash, false);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "disconnect",
+                    peer: b.hash,
+                });
+                await w.until(() => coordinator.phase === "resting", "rests");
+                expect(w.stateOf(b), `${code}`).toBe("left");
+                const sent = w.sent.length;
+                b.refuse = undefined;
+                w.transport.reachable.set(b.hash, true);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "connect",
+                    peer: b.hash,
+                });
+                w.transport.emit({
+                    kind: "subscribe",
+                    peer: b.hash,
+                    key: b.key,
+                });
+                coordinator.onMessage(w.request(b), b.hash, 100, b.key);
+                await settle();
+                await w.clock.advanceSettled(HOUR);
+                expect(w.sent.length, `${code}`).toBe(sent);
+                expect(onWake, `${code}`).not.toHaveBeenCalled();
+            }
+        });
+
+        it("at rest a store close is noted (D6): a peer J could not reach is not asked once its route comes back, nor one that answered by a later wake; its store opened again is asked by the next wake (D4)", async () => {
+            const { w, peers } = await worldWith([
+                ["A", { provenance: CREATOR }],
+                ["L", { provenance: CREATOR, replicator: true }],
+                ["U", { reachable: false }],
+                ["C", { subscriber: false, replicator: true }],
+                ["N", { provenance: CREATOR, subscriber: false }],
+            ]);
+            const [a, l, u, c, n] = peers;
+            // A row only L holds, which J's join does not get yet: L
+            // answers its header, then its pull waits.
+            const [only] = w.rows([l], 1, "l-only-", 5000);
+            w.unserved.add(only.head);
+            c.up = false;
+            await w.start();
+            const { coordinator, decide, onWake } = freshIn(w);
+            // U's subscription, relayed: a sign of life, no record (V2).
+            w.transport.emit({ kind: "subscribe", peer: u.hash, key: u.key });
+            await w.until(
+                () =>
+                    w.stateOf(a) === "contained" &&
+                    w.record(l).headerHeld &&
+                    w.stateOf(l) === "reconciling",
+                "A contained, L answered"
+            );
+            w.transport.reachable.set(l.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: l.hash,
+            });
+            await w.clock.advanceSettled(REQUEST_TIMEOUT_MS);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(l)).toBe("left");
+            expect(coordinator.record(u.hash)).toBeUndefined();
+            const opensToL = opensTo(w, l);
+
+            // U and L close the store; their nodes stay, reachable.
+            l.up = false;
+            u.up = false;
+            w.transport.subscribed.delete(l.hash);
+            w.transport.subscribed.delete(u.hash);
+            w.transport.replicating.delete(l.hash);
+            w.transport.emit({
+                kind: "replicator",
+                type: "leave",
+                peer: l.hash,
+            });
+            for (const peer of [l, u]) {
+                w.transport.emit({
+                    kind: "unsubscribe",
+                    peer: peer.hash,
+                    reason: "remote-unsubscribe",
+                });
+                w.transport.reachable.set(peer.hash, true);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "connect",
+                    peer: peer.hash,
+                });
+            }
+            await w.until(() => w.record(l).storeClosed, "L closed");
+            expect(coordinator.phase).toBe("resting");
+            expect(onWake).not.toHaveBeenCalled();
+            // C's sign of life wakes the check: neither is asked.
+            c.up = true;
+            w.transport.emit({ kind: "subscribe", peer: c.hash, key: c.key });
+            expect(onWake).toHaveBeenCalledTimes(1);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(w.stateOf(c)).toBe("contained");
+            expect(w.stateOf(l)).toBe("left");
+            expect([opensTo(w, l), opensTo(w, u)]).toEqual([opensToL, 0]);
+
+            // L opens the store again: noted at rest, not asked ...
+            l.up = true;
+            w.unserved.delete(only.head);
+            w.transport.subscribed.set(l.hash, l.key);
+            w.transport.replicating.add(l.hash);
+            w.transport.emit({ kind: "subscribe", peer: l.hash, key: l.key });
+            w.transport.emit({
+                kind: "replicator",
+                type: "join",
+                peer: l.hash,
+                key: l.key,
+            });
+            expect(w.record(l).storeClosed).toBe(false);
+            expect(opensTo(w, l)).toBe(opensToL);
+            // ... until the next wake (N's first message) asks it (D4).
+            coordinator.onMessage(w.request(n), n.hash, 100, n.key);
+            expect(onWake).toHaveBeenCalledTimes(2);
+            await w.until(
+                () =>
+                    coordinator.phase === "resting" &&
+                    w.stateOf(l) === "contained",
+                "rests, L contained"
+            );
+            expect(opensTo(w, l)).toBe(opensToL + 1);
+            expect(w.jIndex().get(only.id!)).toBe(only.head);
+            expect(decide).toHaveBeenCalledTimes(3);
+            expect(opensTo(w, u)).toBe(0);
+        });
+
+        it("a label that lands after a new record blocks does not rest the check: `rest` reads the predicate again", async () => {
+            const { w, peers } = await worldWith([
+                ["A", { provenance: CREATOR }],
+                ["X", { provenance: CREATOR, subscriber: false }],
+            ]);
+            const [a, x] = peers;
+            await w.start();
+            let coordinator!: Coordinator;
+            let release!: () => void;
+            const gate = new Promise<void>((resolve) => (release = resolve));
+            const rested: boolean[] = [];
+            const decide = vi.fn(async () => {
+                if (decide.mock.calls.length === 1) await gate;
+                rested.push(coordinator.rest());
+            });
+            coordinator = w.run({ purpose: "freshness", decide });
+            await w.until(() => decide.mock.calls.length === 1, "decided");
+            expect(w.stateOf(a)).toBe("contained");
+            // Before the host's label: X shows life; its header is late.
+            x.hooks.delayToJ = (message) =>
+                message instanceof HeaderV1 ? 1000 : 0;
+            w.transport.emit({ kind: "subscribe", peer: x.hash, key: x.key });
+            expect(w.stateOf(x)).toBe("asking");
+            release();
+            await settle();
+            expect(rested).toEqual([false]);
+            expect(coordinator.phase).toBe("running");
+            expect(w.record(x).session).toBeDefined();
+            await w.clock.advanceSettled(1000);
+            await w.until(() => coordinator.phase === "resting", "rests");
+            expect(rested).toEqual([false, true]);
+            expect(w.stateOf(x)).toBe("contained");
+        });
     });
 });

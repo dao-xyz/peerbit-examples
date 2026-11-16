@@ -478,37 +478,50 @@ donor is needed, so two warm replicas reopened together check each other; a
 gated joiner counts as a contained peer. A peer that left before answering
 counts as settled, as for a join, and is listed in `freshness.gaps`: a warm
 reopen whose only peer holding rows left unanswered still turns fresh, with
-that gap recorded. As for a join, a peer known only by its replicator row,
-with no sign of life, is asked once and stops counting if it does not answer:
-replicas reopened at the same moment can turn fresh before comparing with
-peers that were still opening, and `freshness` does not list those. The check
-runs once per open and asks nothing again once it held; it arms no timer, and a silent peer keeps it at `checking` with no
-further requests. A peer that answered `BUSY` is asked again on its next
-message or capacity notice; one that refused on a fault of its own readiness
-state may send neither, and keeps the check at `checking` too. Nothing is
-persisted: every warm reopen checks again.
+that gap recorded. As for a join, a peer known only by its replicator row, with
+no sign of life, is asked once and stops counting if it does not answer
+(`freshness.unconfirmed` lists those): replicas reopened at the same moment can
+turn fresh before comparing with peers that were still opening. Once fresh, the
+check rests but keeps listening. It asks a peer that never answered it again on
+a sign of life (its readiness subscription, any readiness message or a
+replication announcement), and one that left before answering when it is back,
+if it showed life since it was last asked; it asks a peer it has not met on its
+first readiness message (a replica reopened after it). The state is then
+`checking` until that peer is contained, gone or excluded, then `fresh` again,
+with the notices sent again. A removal from the trust set of an
+access-controlled store has the contained peers asked again the same way. At
+rest, a peer that answered (a header, `BUSY` or a refusal) is not asked again;
+one that left with a gap is asked again if it is back when the check next runs.
+A subscription relayed for a dead peer that never answered, whose route
+lingers, counts as a sign of life, as while the check runs, and keeps the state
+at `checking` until that route goes. The check arms no timer, and a silent peer
+keeps it at `checking` with no further requests. While it runs, a peer that
+answered `BUSY` is asked again on its next message or capacity notice; one that
+refused on a fault of its own readiness state may send neither, and keeps the
+check at `checking` too. Nothing is persisted: every warm reopen checks again.
 
-Once fresh, the replica tells peers of this release `warm-fresh` instead of
-`warm` (both qualify it as a donor) and sends each peer it exchanged requests
-with a notice. Peers of 0.17.x keep seeing `warm`, as before, in answers and
-notices alike, so a 0.17.x joiner that met a gated replica qualifies it on the
-notice of its flip.
+While fresh, the replica tells peers of this release `warm-fresh` instead of
+`warm` (both qualify it as a donor), and each time it turns fresh it sends each
+peer it exchanged requests with a notice. Peers of 0.17.x keep seeing `warm`,
+as before, in answers and notices alike, so a 0.17.x joiner that met a gated
+replica qualifies it on the notice of its flip.
 
 `bootstrapStatus().freshness` (`FreshnessStatus`) reports the check on a warm
 full-replica open: `state` is `unchecked` (no peer compared yet), `checking`,
-`fresh` (for the rest of the open) or `fault` (this replica's own readiness
-state failed; reopen); `off` on a warm reopen under `allowPartialWrites`, which
-runs none. It also lists `contained`, `excluded`, `silent` and `gaps`, the
-`required` count, the first blocking peer's `reason`, `ms` from the end of the
-open to fresh, and `requests` sent for it. It is undefined on every other open.
-Each state change dispatches `freshness:change` on `fs.program.events`
+`fresh` or `fault` (this replica's own readiness state failed; reopen); `off`
+on a warm reopen under `allowPartialWrites`, which runs none. It also lists
+`contained`, `excluded`, `silent`, `gaps` and `unconfirmed`, the `required`
+count, the first blocking peer's `reason`, `ms` from the end of the open to
+the latest `fresh`, and `requests` sent for it. It is undefined on every other
+open. Each state change dispatches `freshness:change` on `fs.program.events`
 (`event.detail`: `state`, the `contained` count, and `ms` once fresh).
 
 With `writeReadiness: { requireFreshOnReopen: true }` a warm reopen stays
 write-gated (`EAGAIN`), with the resurrection guard armed on its proven view,
 until the check holds, then turns writable with the source and proof its state
-file already holds and dispatches `write:ready`. Offline, or while a silent or
-`BUSY` peer keeps the check at `checking`, it stays gated, with no timer;
+file already holds and dispatches `write:ready`; a later return to `checking`
+moves the label only, never the gate. Offline, or while a silent or `BUSY` peer
+keeps the check at `checking`, it stays gated, with no timer;
 `assumeComplete()` releases it and records `operator`. It cannot be
 combined with `allowPartialWrites` (`EINVAL`) and changes no other open. The
 CLI's `mount --require-fresh` sets it; the CLI's short commands check only if
@@ -657,8 +670,8 @@ creator or a warm reopen (at a `requireFreshOnReopen` flip, the freshness
 check's peers).
 
 A warm full-replica open emits `freshness` at each change of its freshness
-state, with the `state`, the `contained`, `excluded` and `gaps` counts, `ms`
-once fresh and the `requests` sent for the check.
+state, with the `state`, the `contained`, `excluded`, `gaps` and `unconfirmed`
+counts, `ms` once fresh and the `requests` sent for the check.
 
 A fresh full join also emits `readiness-peer` when a peer's state or the reason
 for it changes, at most once per peer per readiness evaluation and never after
