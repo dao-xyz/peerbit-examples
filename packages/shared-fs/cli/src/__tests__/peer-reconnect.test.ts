@@ -483,23 +483,19 @@ describe("mount --peer reconnect over real TCP", () => {
         const hub = await createHub();
         const hubFs = await hub.start();
         const address = hubFs.address;
-        const join = async (label: string) => {
+        /** A --peer client that is write-ready within `ms`. */
+        const join = async (label: string, ms: number) => {
             const startedAt = performance.now();
             const peer = await startClient(await newDirectory(label));
             const warn = vi.fn();
             await connectMountToNetwork(peer, { peer: [hub.multiaddr] }, warn);
             expect(warn).not.toHaveBeenCalled();
-            const deadline = giveUpAfter(
-                JOIN_AND_SYNC_MS,
-                `client ${label} joins`
-            );
+            const deadline = giveUpAfter(ms, `client ${label} joins`);
             try {
                 const handle = await Promise.race([
                     (async () => {
                         const handle = await open(peer, label, address);
-                        await handle.awaitWriteReady({
-                            timeout: JOIN_AND_SYNC_MS,
-                        });
+                        await handle.awaitWriteReady({ timeout: ms });
                         return handle;
                     })(),
                     deadline.expired,
@@ -526,8 +522,8 @@ describe("mount --peer reconnect over real TCP", () => {
                 label
             );
 
-        const a = await join("a");
-        const b = await join("b");
+        const a = await join("a", SETUP_MS);
+        const b = await join("b", SETUP_MS);
         await a.handle.writeFile("/a1.txt", "a1");
         await readsAs(b.handle, "/a1.txt", "a1");
 
@@ -555,7 +551,7 @@ describe("mount --peer reconnect over real TCP", () => {
         ]);
         const abSyncMs = performance.now() - syncedAt;
 
-        const c = await join("c");
+        const c = await join("c", JOIN_AND_SYNC_MS);
         const cWroteAt = performance.now();
         await c.handle.writeFile("/c1.txt", "c1");
         await Promise.all([
