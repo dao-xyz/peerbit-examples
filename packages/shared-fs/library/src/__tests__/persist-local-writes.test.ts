@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, describe, expect, it } from "vitest";
-import { openSharedFs, PersistLocalWritesError } from "../index.js";
+import {
+    FileVersion,
+    openSharedFs,
+    PersistLocalWritesError,
+    type SharedFsHandle,
+} from "../index.js";
 
 // A give-up bound, not a retry budget.
 const WAIT_TIMEOUT_MS = 30_000;
@@ -45,21 +50,16 @@ describe("persistLocalWrites", () => {
             gc: false,
         });
 
-    it("fences only this replica's writes, once each, while another writer writes", async () => {
-        const sourcePeer = await createPeer("source");
-        const otherPeer = await createPeer("other");
-        await sourcePeer.dial(otherPeer);
-        const source = await open(sourcePeer, "source");
-        const other = await open(otherPeer, "other", source.address);
-        // Program events: the join the ledger watches.
-        await new Promise<void>((resolve, reject) => {
-            const events = source.program.entries.log.events;
+    // Program events: the join the ledger watches.
+    const untilReplicaSeen = (fs: SharedFsHandle) =>
+        new Promise<void>((resolve, reject) => {
+            const events = fs.program.entries.log.events;
             const timer = setTimeout(
                 () => reject(new Error("no replicator:join")),
                 WAIT_TIMEOUT_MS
             );
             const check = () => {
-                if (source.pendingLocalWrites().remoteReplicaSeen) {
+                if (fs.pendingLocalWrites().remoteReplicaSeen) {
                     clearTimeout(timer);
                     events.removeEventListener("replicator:join", check);
                     resolve();
@@ -68,6 +68,46 @@ describe("persistLocalWrites", () => {
             events.addEventListener("replicator:join", check);
             check();
         });
+
+    const pair = async () => {
+        const sourcePeer = await createPeer("source");
+        const otherPeer = await createPeer("other");
+        await sourcePeer.dial(otherPeer);
+        const source = await open(sourcePeer, "source");
+        const other = await open(otherPeer, "other", source.address);
+        await untilReplicaSeen(source);
+        return { source, other, sourcePeer };
+    };
+
+    // Runs `during` once, as the fence starts delivering.
+    const onFirstDelivery = (
+        fs: SharedFsHandle,
+        during: () => Promise<unknown>
+    ) => {
+        const log: any = fs.program.entries.log;
+        const deliver = log.deliverPersistedEntries.bind(log);
+        let first = true;
+        log.deliverPersistedEntries = async (...args: unknown[]) => {
+            if (first) {
+                first = false;
+                await during();
+            }
+            return deliver(...args);
+        };
+    };
+
+    // None of the events a waiting fence starts over on.
+    const withholdReplicationEvents = (fs: SharedFsHandle) => {
+        const events: any = fs.program.entries.log.events;
+        const dispatch = events.dispatchEvent.bind(events);
+        events.dispatchEvent = (event: Event) =>
+            /^replicator:(join|mature)$|^replication:change$/.test(
+                event.type
+            ) || dispatch(event);
+    };
+
+    it("fences only this replica's writes, once each, while another writer writes", async () => {
+        const { source, other } = await pair();
 
         const before = source.pendingLocalWrites().entries;
         await source.writeFile("/a.txt", "a");
@@ -100,14 +140,85 @@ describe("persistLocalWrites", () => {
             await source.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
         ).toBe(0);
 
-        // A rewrite: only its new entries are pending and sent.
+        // A rewrite: only its new entries are pending, sent with the name
+        // they resolve through (sent again: it may have changed).
         await source.writeFile("/a.txt", "a, again");
         const rewrite = source.pendingLocalWrites().entries;
         expect(rewrite).toBeGreaterThan(0);
         expect(rewrite).toBeLessThan(before + 6);
         expect(
             await source.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
-        ).toBe(rewrite);
+        ).toBe(rewrite + 1);
+    });
+
+    it("starts over when an entry it holds is deleted under it", async () => {
+        const { source } = await pair();
+        const versions: string[] = [];
+        source.program.entries.events.addEventListener("change", (event) => {
+            for (const value of event.detail.added)
+                if (value instanceof FileVersion) versions.push(value.id);
+        });
+        await source.writeFile("/a.txt", "a");
+        await source.writeFile("/a.txt", "a, again");
+        const pending = source.pendingLocalWrites().entries;
+        withholdReplicationEvents(source);
+        // As GC deletes the superseded version.
+        onFirstDelivery(source, () => source.program.entries.del(versions[0]));
+        expect(
+            await source.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
+        ).toBe(pending - 1);
+        expect(source.pendingLocalWrites().entries).toBe(0);
+    });
+
+    it("is not failed by a snapshot published while it runs", async () => {
+        const { source } = await pair();
+        await source.writeFile("/a.txt", "a");
+        // The next snapshot CUTs this one's manifest: maintenance, not fenced.
+        await source.snapshotWrite();
+        const pending = source.pendingLocalWrites().entries;
+        withholdReplicationEvents(source);
+        onFirstDelivery(source, () => source.snapshotWrite());
+        expect(
+            await source.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
+        ).toBe(pending);
+        expect(source.pendingLocalWrites().entries).toBe(0);
+    });
+
+    it("fences what is written while it runs", async () => {
+        const { source } = await pair();
+        await source.writeFile("/before.txt", "before");
+        const pending = source.pendingLocalWrites().entries;
+        onFirstDelivery(source, () => source.writeFile("/during.txt", "x"));
+        expect(
+            await source.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
+        ).toBe(pending + 3);
+        expect(source.pendingLocalWrites().entries).toBe(0);
+    });
+
+    it("fences the names a path resolves through, an earlier session's too", async () => {
+        const writerPeer = await createPeer("writer");
+        // An earlier session, alone, makes /dir and ends without a fence.
+        const earlier = await open(writerPeer, "writer");
+        const address = earlier.address!;
+        await earlier.mkdir("/dir");
+        await earlier.program.close();
+
+        const receiverPeer = await createPeer("receiver");
+        await writerPeer.dial(receiverPeer);
+        const writer = await open(writerPeer, "writer", address);
+        const receiver = await open(receiverPeer, "receiver", address);
+        await untilReplicaSeen(writer);
+        const before = writer.pendingLocalWrites().entries;
+        await writer.writeFile("/dir/new.txt", "new");
+        expect(writer.pendingLocalWrites().entries).toBe(before + 3);
+        // /dir's name too, though no write of this session made it.
+        expect(
+            await writer.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
+        ).toBe(before + 4);
+        await writerPeer.stop();
+        expect(
+            new TextDecoder().decode(await receiver.readFile("/dir/new.txt"))
+        ).toBe("new");
     });
 
     it("fails at once without a timeout when no replica can acknowledge, listing what is left", async () => {

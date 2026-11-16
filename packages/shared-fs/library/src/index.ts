@@ -3367,6 +3367,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private localWrites?: Map<string, { nodeId?: string }>;
     private remoteReplicaSeen?: boolean;
     private replicationEvent?: Promise<void>;
+    private localWriteRemoval?: AbortController;
+    private localWriteRemoved?: () => void;
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
     // --- Cold-start bootstrap state (all re-initialized in open()) ---
@@ -4327,7 +4329,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             wake();
             this.replicationEvent = new Promise((resolve) => (wake = resolve));
         };
-        onReplication();
+        // A removal from localWrites aborts a delivery that may name it.
+        (this.localWriteRemoved = () => {
+            this.localWriteRemoval?.abort();
+            this.localWriteRemoval = new AbortController();
+            onReplication();
+        })();
         const lifecycle = this.maintenanceAbortController!.signal;
         for (const type of REPLICATION_EVENTS)
             this.entries.log.events.addEventListener(type, onReplication, {
@@ -4433,15 +4440,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
-            // Gone here (GC): nothing left for persistLocalWrites to deliver.
-            for (const value of removed) this.localWrites?.delete(value?.id);
+            // Gone here (a CUT, GC, a replicated delete): nothing left for
+            // persistLocalWrites to deliver.
+            for (const value of removed)
+                if (this.localWrites?.delete(value?.id))
+                    this.localWriteRemoved?.();
             for (const value of added) {
                 // persistLocalWrites: this key's entries and the chunks its
                 // versions name (shared by content, maybe appended elsewhere).
-                if (
-                    value?.authorKey === localKey ||
-                    value?.id === `bootstrap:${localKey}`
-                ) {
+                // Not the snapshot manifest: maintenance, no user write.
+                if (value?.authorKey === localKey) {
                     const write = { nodeId: value.nodeId };
                     for (const id of [...(value.chunkIds ?? []), value.id])
                         this.localWrites?.set(id, write);
@@ -15980,10 +15988,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Await receipts from `minAcks` (default 1) remote replicas for each
-     * entry written here since open, on prepareForDisposal's receipt path;
-     * arrivals do not fail it. Resolves with the count acknowledged. With a
-     * timeout, no remote leader means waiting for one until the deadline.
+     * Await receipts from `minAcks` (default 1) remote replicas, on
+     * prepareForDisposal's receipt path, for each entry written here since
+     * open and the naming heads its paths resolve through (whoever wrote
+     * them), until none is left; arrivals do not fail it. Resolves with the
+     * count acknowledged. With a timeout, no remote leader means waiting for
+     * one until the deadline.
      */
     async persistLocalWrites(
         options: Partial<PrepareForDisposalOptions> = {}
@@ -15996,96 +16006,113 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         this.validatePrepareForDisposalOptions(fence, "persistLocalWrites");
         const context = this.currentMaintenanceContext("persistLocalWrites");
         const deadline = fence.timeout && Date.now() + fence.timeout;
+        const step = <T>(promise: Promise<T>) =>
+            this.awaitDisposalStep(promise, fence, deadline, context);
         const ledger = this.localWrites ?? new Map();
-        const captured = new Map(ledger);
-        const settle = (ids: string[]) => {
-            for (const id of ids)
-                if (ledger.get(id) === captured.get(id)) ledger.delete(id);
-        };
+        const walked = new Set<string>();
         const progress = { confirmedEntries: 0, receiptBatches: 0 };
-        const run = async () => {
-            try {
-                const ids = [...captured.keys()];
-                const refs: Array<
-                    DisposalEntryRef & { order: number; size: number }
-                > = [];
-                for (let i = 0; i < ids.length; i += HEAD_QUERY_BATCH) {
-                    const byId = ids
-                        .slice(i, i + HEAD_QUERY_BATCH)
-                        .map((id) => new StringMatch({ key: "id", value: id }));
-                    const rows = await this.awaitDisposalStep(
-                        this.queryRows([
-                            byId.length > 1 ? new Or(byId) : byId[0],
-                        ]),
-                        fence,
+        // One pass over the ledger; it returns early to start over.
+        const pass = async () => {
+            let level = [...ledger.values()].map((w) => w.nodeId) as string[];
+            while (
+                (level = [...new Set(level)].filter(
+                    (id) => id && id !== ROOT_NODE_ID && !walked.has(id)
+                )).length
+            ) {
+                level.forEach((id) => walked.add(id));
+                const states = await step(this.namingStatesForNodes(level));
+                level = [];
+                for (const { nodeId, heads, winner } of states.values()) {
+                    for (const { id } of heads)
+                        if (!ledger.has(id)) ledger.set(id, { nodeId });
+                    level.push(winner.parentId);
+                }
+            }
+            // A removal from here on (a CUT, GC, a replicated delete) aborts
+            // a delivery that may name it, and the next pass resolves again.
+            const joined = this.replicationEvent!;
+            const removal = this.localWriteRemoval!.signal;
+            const writes = new Map(ledger);
+            const ids = [...writes.keys()];
+            const refs: Array<
+                DisposalEntryRef & { order: number; size: number }
+            > = [];
+            for (let i = 0; i < ids.length; ) {
+                const byId = ids
+                    .slice(i, (i += HEAD_QUERY_BATCH))
+                    .map((id) => new StringMatch({ key: "id", value: id }));
+                for (const raw of await step(
+                    this.queryRows([byId.length > 1 ? new Or(byId) : byId[0]])
+                )) {
+                    refs.push({
+                        ...this.disposalEntryRef(raw, raw.kind),
+                        order:
+                            raw.kind === "file-chunk"
+                                ? 0
+                                : raw.kind === "file-version"
+                                  ? 1
+                                  : 2,
+                        size: raw.__context?.size ?? 0,
+                    });
+                }
+            }
+            const settle = (ids: string[]) => {
+                for (const id of ids)
+                    if (ledger.get(id) === writes.get(id)) ledger.delete(id);
+            };
+            // Deleted since: nothing left to deliver.
+            const found = new Set(refs.map(({ id }) => id));
+            settle(ids.filter((id) => !found.has(id)));
+            refs.sort((a, b) => a.order - b.order);
+            for (let start = 0, end = 0; start < refs.length; start = end) {
+                for (
+                    let bytes = 0;
+                    end < refs.length;
+                    bytes += refs[end++].size
+                ) {
+                    if (
+                        end - start === DISPOSAL_METADATA_BATCH_SIZE ||
+                        bytes >= LOCAL_WRITE_BATCH_BYTES ||
+                        refs[end].order !== refs[start].order
+                    )
+                        break;
+                }
+                const batch = refs.slice(start, end);
+                try {
+                    await this.deliverDisposalBatch(
+                        batch,
+                        {
+                            ...fence,
+                            signal: AbortSignal.any(
+                                [removal, fence.signal!].filter(Boolean)
+                            ),
+                        },
                         deadline,
+                        progress,
+                        this.entries,
                         context
                     );
-                    for (const raw of rows) {
-                        refs.push({
-                            ...this.disposalEntryRef(raw, raw.kind),
-                            order:
-                                raw.kind === "file-chunk"
-                                    ? 0
-                                    : raw.kind === "file-version"
-                                      ? 1
-                                      : 2,
-                            size: raw.__context?.size ?? 0,
-                        });
+                } catch (error) {
+                    // No remote leader, or an entry gone under it: start over
+                    // on the next replication event or removal, until the
+                    // deadline.
+                    if (!removal.aborted || fence.signal?.aborted) {
+                        if (!deadline) throw error;
+                        await step(joined);
                     }
+                    return;
                 }
-                // Deleted since: nothing left to deliver.
-                const found = new Set(refs.map(({ id }) => id));
-                settle(ids.filter((id) => !found.has(id)));
-                refs.sort((a, b) => a.order - b.order);
-                for (let start = 0, end = 0; start < refs.length; start = end) {
-                    for (
-                        let bytes = 0;
-                        end < refs.length;
-                        bytes += refs[end++].size
-                    ) {
-                        if (
-                            end - start === DISPOSAL_METADATA_BATCH_SIZE ||
-                            bytes >= LOCAL_WRITE_BATCH_BYTES ||
-                            refs[end].order !== refs[start].order
-                        )
-                            break;
-                    }
-                    const batch = refs.slice(start, end);
-                    for (;;) {
-                        // Taken before the attempt, so a join during it counts.
-                        const joined = this.replicationEvent!;
-                        try {
-                            await this.deliverDisposalBatch(
-                                batch,
-                                fence,
-                                deadline,
-                                progress,
-                                this.entries,
-                                context
-                            );
-                            break;
-                        } catch (error) {
-                            // No remote leader (yet): retry on the next
-                            // membership change, until the deadline.
-                            if (error instanceof SharedFsError || !deadline)
-                                throw error;
-                            await this.awaitDisposalStep(
-                                joined,
-                                fence,
-                                deadline,
-                                context
-                            );
-                        }
-                    }
-                    settle(batch.map(({ id }) => id));
-                }
+                settle(batch.map(({ id }) => id));
+            }
+        };
+        const run = async () => {
+            try {
+                while (ledger.size) await pass();
                 return progress.confirmedEntries;
             } catch (error) {
                 const states = new Map<string, NodeNamingState>();
                 const unacknowledged: UnacknowledgedWrite[] = [];
-                for (const [id, { nodeId }] of captured) {
-                    if (!ledger.has(id)) continue;
+                for (const [id, { nodeId }] of [...ledger]) {
                     const path =
                         nodeId &&
                         (await this.pathForNode(nodeId, states).catch(
