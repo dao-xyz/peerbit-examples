@@ -560,21 +560,28 @@ still dial `--peer` and `--bootstrap`.
 
 ## Stop a mount: persist-on-exit
 
-The first Ctrl-C, SIGTERM, Ctrl-Break (Windows) or `shutdown` line on a piped
-stdin stops `mount`: the adapter detaches, files still open are saved, and then,
-if another replica of the filesystem was seen in this session, `mount` waits up
-to `--persist-timeout-ms` (default 30000) until one holds every entry it wrote
-in this session (chunks, versions, names). With no replica seen it does not
-wait and says so. Writes of an earlier run that was killed are not covered.
-`--no-persist-on-exit` skips the wait. A second request aborts it; a third
-exits at once. Windows has no SIGTERM: `taskkill` and `child.kill()` end the
-process without any of this, so a supervisor sends `shutdown` instead.
+Ctrl-C, SIGTERM, SIGHUP, Ctrl-Break (Windows) or a `shutdown` line on a piped
+stdin stops `mount`: the adapter detaches, files still open are saved, and,
+if another replica of the filesystem was seen in this session, `mount` waits
+up to `--persist-timeout-ms` (default 30000) until one holds every entry it
+wrote in this session and the names its paths go through (an earlier run's
+too). With no replica seen it does not wait and says so. An earlier run's own
+files are not covered if it was killed. The wait sends the whole session again
+(on loopback about 4,000 entries, or 64 MiB, in a second): raise the timeout
+for long sessions or slow links. `--no-persist-on-exit` skips it.
 
-Exit codes: 0 stopped; 1 failed (also when an open file could not be saved); 75
-the wait gave up, with one `persist-on-exit: unacknowledged {"path":...,"ids":[...]}`
-line per file on stderr; 130 aborted. Unlike `prepare-disposal`, it fences only
-this session's own writes, while other writers keep writing; retire a machine
-with `prepare-disposal`.
+npm, pnpm and npx pass a Ctrl-C on twice; that copy is ignored. Once the wait
+runs, the next request aborts it: the list is printed and `mount` exits at once
+(130), without stopping Peerbit. Any further request exits at once. Windows has
+no SIGTERM: `taskkill` and `child.kill()` skip all this, so send `shutdown`; a
+closed console window leaves about 10 s.
+
+Exit codes: 0 stopped; 1 failed, or an open file could not be saved
+(`persist-on-exit: unsaved {"path":...}`), kept over 75 and 130; 75 the wait
+gave up, with one `persist-on-exit: unacknowledged {"path":...,"ids":[...]}`
+line per file (200, then `unlisted {"paths":n}`); 130 aborted. Unlike
+`prepare-disposal`, it fences only this session's own writes, while other
+writers keep writing; retire a machine with `prepare-disposal`.
 
 ## Safely dispose of a machine
 

@@ -18,6 +18,7 @@ import {
     runCli,
     stopMountSession,
     waitForTermination,
+    type MountShutdown,
 } from "../index.js";
 
 /**
@@ -29,8 +30,13 @@ import {
  * gives up at its deadline.
  */
 
-/** Steps that are not under test (a join, a reconnect); give-up bound. */
-const SETUP_MS = 60_000;
+/**
+ * Give-up bounds: a step that is not under test (a join, a reconnect), and
+ * the fence of a test that expects it to finish. A test's bounds sum below
+ * vitest's 120 s, so a stuck step fails with its own label.
+ */
+const STEP_MS = 20_000;
+const FENCE_MS = 30_000;
 
 const text = (bytes: Uint8Array | undefined) =>
     bytes ? new TextDecoder().decode(bytes) : undefined;
@@ -49,6 +55,16 @@ const giveUpAfter = (ms: number, label: string) => {
     return { expired, clear: () => clearTimeout(timer) };
 };
 
+/** `promise`, or a rejection naming `label` once `ms` pass. */
+const within = async <T>(promise: Promise<T>, label: string, ms = STEP_MS) => {
+    const deadline = giveUpAfter(ms, label);
+    try {
+        return await Promise.race([promise, deadline.expired]);
+    } finally {
+        deadline.clear();
+    }
+};
+
 /** Resolves once `check()` holds, checking on each `type` event. */
 const untilEvent = async (
     target: EventTarget,
@@ -56,7 +72,7 @@ const untilEvent = async (
     check: () => boolean,
     label: string
 ) => {
-    const deadline = giveUpAfter(SETUP_MS, label);
+    const deadline = giveUpAfter(STEP_MS, label);
     let listener: (() => void) | undefined;
     try {
         await Promise.race([
@@ -99,36 +115,73 @@ describe("mount shutdown requests", () => {
         process.exitCode = undefined;
     });
 
-    it("runs the stop on the first request, aborts it on the second and exits 130 on the third", async () => {
-        const host = fakeHost();
-        const input = new PassThrough();
-        let release!: () => void;
-        let signal: AbortSignal | undefined;
+    /** A stop that runs until released, and the shutdown it was given. */
+    const pendingStop = (
+        host: ReturnType<typeof fakeHost>,
+        input = new PassThrough()
+    ) => {
+        const state: { shutdown?: MountShutdown; release(): void } = {
+            release: () => {},
+        };
         const stopped = waitForTermination(
-            (stopSignal) => {
-                signal = stopSignal;
-                return new Promise<void>((resolve) => (release = resolve));
+            (shutdown) => {
+                state.shutdown = shutdown;
+                return new Promise<void>(
+                    (resolve) => (state.release = resolve)
+                );
             },
             host as any,
             input
         );
-        expect(signal).toBeUndefined();
+        return Object.assign(state, { stopped, input });
+    };
 
-        host.emit("SIGTERM");
-        expect(signal?.aborted).toBe(false);
+    it("ignores a wrapper's copy of a request, aborts only a wait under way, and exits at once otherwise", async () => {
+        const host = fakeHost();
+        const stop = pendingStop(host);
+        expect(stop.shutdown).toBeUndefined();
+
+        // npm, pnpm and npx pass one Ctrl-C on as a second SIGINT.
         host.emit("SIGINT");
-        expect(signal?.aborted).toBe(true);
+        host.emit("SIGINT");
+        expect(stop.shutdown?.signal.aborted).toBe(false);
         expect(host.exit).not.toHaveBeenCalled();
-        host.emit("SIGBREAK");
+        // The wait is under way: a request aborts it, its copy does nothing.
+        stop.shutdown!.phase = 1;
+        host.emit("SIGTERM");
+        host.emit("SIGTERM");
+        expect(stop.shutdown!.signal.aborted).toBe(true);
+        expect(host.exit).not.toHaveBeenCalled();
+        // A closed terminal (SIGHUP) is a request too: this one exits.
+        host.emit("SIGHUP");
         expect(host.exit).toHaveBeenCalledWith(130);
 
-        release();
-        await stopped;
-        for (const name of ["SIGINT", "SIGTERM", "SIGBREAK"]) {
+        stop.release();
+        await stop.stopped;
+        for (const name of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
             expect(host.listenerCount(name), name).toBe(0);
         }
-        expect(input.listenerCount("data")).toBe(0);
-        expect(input.isPaused()).toBe(true);
+        expect(stop.input.listenerCount("data")).toBe(0);
+        expect(stop.input.isPaused()).toBe(true);
+    });
+
+    it("exits at once on a third request before the wait, and on any after it, with the exit code set", async () => {
+        const host = fakeHost();
+        const stop = pendingStop(host);
+        host.emit("SIGHUP");
+        expect(stop.shutdown).toBeDefined();
+        host.emit("SIGHUP");
+        expect(host.exit).not.toHaveBeenCalled();
+        host.emit("SIGBREAK");
+        expect(host.exit).toHaveBeenLastCalledWith(130);
+        // The wait gave up (75): Peerbit is stopping.
+        stop.shutdown!.phase = 2;
+        process.exitCode = 75;
+        host.emit("SIGINT");
+        expect(host.exit).toHaveBeenLastCalledWith(75);
+        expect(host.exit).toHaveBeenCalledTimes(2);
+        stop.release();
+        await stop.stopped;
     });
 
     it("takes a shutdown line on a piped stdin, but never reads a terminal", async () => {
@@ -209,8 +262,9 @@ describe("mount shutdown requests", () => {
             dispose: () => order.push("dispose"),
         };
         const host = fakeHost();
+        host.exit.mockImplementation(() => void order.push("exit"));
         const stopped = waitForTermination(
-            (signal) =>
+            (shutdown) =>
                 stopMountSession({
                     mounted: {
                         unmount: async () => void order.push("unmount"),
@@ -221,7 +275,7 @@ describe("mount shutdown requests", () => {
                         persistOnExit(
                             fsHandle as any,
                             { persistOnExit: true, persistTimeoutMs: 30_000 },
-                            signal
+                            shutdown
                         ),
                     stopPeerbit: async () => void order.push("peerbit"),
                 }),
@@ -229,20 +283,24 @@ describe("mount shutdown requests", () => {
             new PassThrough()
         );
         host.emit("SIGINT");
+        host.emit("SIGINT");
         await fenceRunning;
         expect(fence?.timeout).toBe(30_000);
         expect(fence?.signal?.aborted).toBe(false);
         host.emit("SIGTERM");
         await stopped;
 
+        // Out right after the list: Peerbit is not stopped first.
         expect(order).toEqual([
             "unmount",
             "ipc",
             "drain",
             "dispose",
             "persist",
+            "exit",
             "peerbit",
         ]);
+        expect(host.exit).toHaveBeenCalledWith(130);
         expect(process.exitCode).toBe(130);
         expect(unacknowledged(lines)).toEqual([
             { path: "/a.txt", ids: ["chunk:a", "version:a"] },
@@ -253,7 +311,21 @@ describe("mount shutdown requests", () => {
         );
     });
 
-    it("exits 1 when an open file's bytes cannot be saved, and still stops", async () => {
+    /** A fence that gives up, leaving `paths` unacknowledged. */
+    const givingUp = (paths: number, order: string[] = []) => ({
+        pendingLocalWrites: () => ({ entries: paths, remoteReplicaSeen: true }),
+        persistLocalWrites: async () => {
+            order.push("persist");
+            throw Object.assign(new Error("Timed out"), {
+                unacknowledged: Array.from({ length: paths }, (_, i) => ({
+                    id: `version:${i}`,
+                    path: `/f${i}.txt`,
+                })),
+            });
+        },
+    });
+
+    it("exits 1 when an open file's bytes cannot be saved, still fences and stops, and keeps 1 when the fence gives up", async () => {
         const lines: string[] = [];
         vi.spyOn(console, "error").mockImplementation((...args) => {
             lines.push(args.join(" "));
@@ -266,14 +338,45 @@ describe("mount shutdown requests", () => {
                 }),
                 dispose: () => order.push("dispose"),
             },
+            persist: () =>
+                persistOnExit(givingUp(1, order) as any, {
+                    persistOnExit: true,
+                    persistTimeoutMs: 1,
+                }),
             stopPeerbit: async () => void order.push("peerbit"),
         });
-        expect(lines).toContain("Could not save /open.txt: Error: EIO");
+        expect(persistLines(lines)[0]).toBe(
+            'persist-on-exit: unsaved {"path":"/open.txt","error":"Error: EIO"}'
+        );
+        expect(persistLines(lines).at(-1)).toBe(
+            "persist-on-exit: gave up: Timed out"
+        );
         expect(process.exitCode).toBe(1);
-        expect(order).toEqual(["dispose", "peerbit"]);
+        expect(order).toEqual(["dispose", "persist", "peerbit"]);
     });
 
-    it("documents the flags in mount --help and checks --persist-timeout-ms before Peerbit starts", async () => {
+    it("lists 200 unacknowledged paths, then counts the rest on one line", async () => {
+        const lines: string[] = [];
+        vi.spyOn(console, "error").mockImplementation((...args) => {
+            lines.push(args.join(" "));
+        });
+        await persistOnExit(givingUp(250) as any, {
+            persistOnExit: true,
+            persistTimeoutMs: 1,
+        });
+        expect(unacknowledged(lines)).toHaveLength(200);
+        expect(unacknowledged(lines).at(-1)).toEqual({
+            path: "/f199.txt",
+            ids: ["version:199"],
+        });
+        expect(persistLines(lines).slice(-2)).toEqual([
+            'persist-on-exit: unlisted {"paths":50}',
+            "persist-on-exit: gave up: Timed out",
+        ]);
+        expect(process.exitCode).toBe(75);
+    });
+
+    it("documents the flags in mount --help and checks them before Peerbit starts", async () => {
         const log = vi.spyOn(console, "log").mockImplementation(() => {});
         vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
             throw new Error(`process.exit(${code})`);
@@ -314,6 +417,19 @@ describe("mount shutdown requests", () => {
                 `--persist-timeout-ms must be an integer from 1 to 2147483647 (milliseconds); got ${got}`
             );
         }
+        // yargs would read it as --no-persist-on-exit.
+        await expect(
+            runCli([
+                "mount",
+                "zb2rh-not-opened",
+                "/tmp/peerbit-shared-fs-not-mounted",
+                "--persist-on-exit=30000",
+                "--directory",
+                "",
+            ])
+        ).rejects.toThrow(
+            "--persist-on-exit=30000: --persist-on-exit takes no value; set the wait with --persist-timeout-ms"
+        );
         expect(create).not.toHaveBeenCalled();
     });
 });
@@ -438,17 +554,22 @@ describe("mount --persist-on-exit over real TCP", () => {
         input = new PassThrough()
     ) => {
         const stopped = waitForTermination(
-            (signal) =>
+            (shutdown) =>
                 stopMountSession({
                     backend,
                     persist: () =>
-                        persistOnExit(writer.handle, options, signal),
+                        persistOnExit(writer.handle, options, shutdown),
                     stopPeerbit: () => stop(writer.peer),
                 }),
             host as any,
             input
         );
-        return { stopped, host, input };
+        return {
+            // The fence, then Peerbit stops.
+            stopped: within(stopped, "the writer stops", FENCE_MS + STEP_MS),
+            host,
+            input,
+        };
     };
 
     /** Start a stopped replica again from its directory; it dials `to`. */
@@ -501,19 +622,23 @@ describe("mount --persist-on-exit over real TCP", () => {
         const { stopped, input } = shutdownOnRequest(
             { peer: writer.peer, handle: writerFs },
             backend,
-            { persistOnExit: true, persistTimeoutMs: SETUP_MS }
+            { persistOnExit: true, persistTimeoutMs: FENCE_MS }
         );
         input.write("shutdown\n");
         let writerStopped = false;
-        void stopped.then(() => (writerStopped = true));
+        void stopped.then(
+            () => (writerStopped = true),
+            () => {}
+        );
         await Promise.race([untilLine(/waiting up to/), stopped]);
         // The receiver comes back while the writer waits for it. A fence
         // that gives up stops the writer under the dial: report its exit.
         const back = writerStopped
             ? undefined
-            : await rejoin(receiver.directory, address, writer.peer).catch(
-                  (error: Error) => error
-              );
+            : await within(
+                  rejoin(receiver.directory, address, writer.peer),
+                  "the receiver rejoins"
+              ).catch((error: Error) => error);
         await stopped;
         expect(process.exitCode ?? 0, stderr().join("\n")).toBe(0);
         if (back instanceof Error) throw back;
@@ -595,17 +720,20 @@ describe("mount --persist-on-exit over real TCP", () => {
         const { stopped, host } = shutdownOnRequest(
             { peer: writer.peer, handle: writerFs },
             backend,
-            { persistOnExit: true, persistTimeoutMs: SETUP_MS }
+            { persistOnExit: true, persistTimeoutMs: FENCE_MS }
         );
         host.emit("SIGTERM");
         let writerStopped = false;
-        void stopped.then(() => (writerStopped = true));
+        void stopped.then(
+            () => (writerStopped = true),
+            () => {}
+        );
         await Promise.race([untilLine(/waiting up to/), stopped]);
         const fenceStarted = performance.now();
         // Three remote files arrive while the fence waits, then the
         // receiver comes back.
         const during = () => arrivals.filter((at) => at > fenceStarted).length;
-        const deadline = giveUpAfter(SETUP_MS, "three remote files arrive");
+        const deadline = giveUpAfter(STEP_MS, "three remote files arrive");
         try {
             while (!writerStopped && during() < 3) {
                 await Promise.race([
@@ -620,7 +748,10 @@ describe("mount --persist-on-exit over real TCP", () => {
             deadline.clear();
         }
         expect(writerStopped, "the fence waited for the receiver").toBe(false);
-        const back = await rejoin(receiver.directory, address, writer.peer);
+        const back = await within(
+            rejoin(receiver.directory, address, writer.peer),
+            "the receiver rejoins"
+        );
         await stopped;
         writing = false;
         await remoteWrites.catch(() => {});
@@ -703,7 +834,7 @@ describe("mount --persist-on-exit over real TCP", () => {
         const { stopped, host } = shutdownOnRequest(
             { peer: writer.peer, handle: writerFs },
             backend,
-            { persistOnExit: false, persistTimeoutMs: SETUP_MS }
+            { persistOnExit: false, persistTimeoutMs: FENCE_MS }
         );
         host.emit("SIGINT");
         await stopped;
@@ -724,7 +855,7 @@ describe("mount --persist-on-exit over real TCP", () => {
         const { stopped, host } = shutdownOnRequest(
             { peer: writer.peer, handle: writerFs },
             backend,
-            { persistOnExit: true, persistTimeoutMs: SETUP_MS }
+            { persistOnExit: true, persistTimeoutMs: FENCE_MS }
         );
         const requested = performance.now();
         host.emit("SIGTERM");
@@ -737,6 +868,6 @@ describe("mount --persist-on-exit over real TCP", () => {
                 /^persist-on-exit: no other replica seen; not waiting \(\d+ entries only here\)$/
             ),
         ]);
-        expect(performance.now() - requested).toBeLessThan(SETUP_MS / 2);
+        expect(performance.now() - requested).toBeLessThan(FENCE_MS);
     });
 });

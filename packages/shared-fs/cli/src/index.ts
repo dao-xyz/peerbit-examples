@@ -394,9 +394,10 @@ const closeMountProfile = async (
 /**
  * Tear down a mount in dependency order. The profile is closed once the mount
  * and IPC server have stopped producing events, before Peerbit stops, so a
- * slow or failing Peerbit shutdown cannot lose the profile summary. With
- * `ignoreErrors` every step runs and failures are swallowed (error path);
- * otherwise the first failure is rethrown after the profile is closed.
+ * slow or failing Peerbit shutdown cannot lose the profile summary. Every
+ * step runs, also after one failed (a failed unmount still saves and fences
+ * what was written); the first failure is rethrown at the end, unless
+ * `ignoreErrors` (error path).
  */
 export const stopMountSession = async (
     session: {
@@ -411,50 +412,75 @@ export const stopMountSession = async (
     },
     options: { ignoreErrors?: boolean } = {}
 ) => {
-    const step = (run: () => Promise<void> | undefined) =>
-        options.ignoreErrors
-            ? Promise.resolve()
-                  .then(run)
-                  .catch(() => {})
-            : run();
-    try {
-        await step(() => session.mounted?.unmount());
-        await step(() => session.ipc?.close());
-    } finally {
-        const drained = await session.backend?.drain?.().catch(() => {});
-        for (const { path, error } of drained?.failed ?? []) {
-            console.error(`Could not save ${path}: ${error}`);
-            process.exitCode = 1;
-        }
+    const failures: unknown[] = [];
+    const step = async <T>(run: () => T) => {
         try {
-            session.backend?.dispose?.();
-        } catch {
-            // Unsubscribing cannot leave anything to clean up.
+            return await run();
+        } catch (error) {
+            failures.push(error);
+            // Exit 1 also when an aborted persist exits before the end.
+            if (!options.ignoreErrors) process.exitCode = 1;
         }
-        await closeMountProfile(session.profileWriter).catch(() => {});
+    };
+    await step(() => session.mounted?.unmount());
+    await step(() => session.ipc?.close());
+    const drained = await step(() => session.backend?.drain?.());
+    for (const { path, error } of drained?.failed ?? []) {
+        console.error(
+            `persist-on-exit: unsaved ${JSON.stringify({ path, error: String(error) })}`
+        );
+        process.exitCode = 1;
     }
+    await step(() => session.backend?.dispose?.());
+    await step(() => closeMountProfile(session.profileWriter));
     await step(() => session.persist?.());
     await step(() => session.stopPeerbit());
+    if (failures.length && !options.ignoreErrors) throw failures[0];
 };
 
-// Shutdown requests: SIGINT, SIGTERM, SIGBREAK (Windows Ctrl+Break) and a
-// `shutdown` line on a stdin that is not a terminal. The first runs `stop`,
-// the second aborts its signal (persist-on-exit), the third exits (130).
+/** A shutdown under way; persistOnExit moves `phase` to 1 and 2. */
+export type MountShutdown = {
+    signal: AbortSignal;
+    /** 0 stopping, 1 persist-on-exit waits, 2 after that wait. */
+    phase: number;
+    /** Exit now with the exit code set, else 130. */
+    exit(): void;
+};
+
+const ignore = () => {};
+
+// Shutdown requests: SIGINT, SIGTERM, SIGBREAK, SIGHUP and a `shutdown` line
+// on a stdin that is not a terminal. The first runs `stop`; the first once
+// persist-on-exit waits aborts the wait. One more right after either is a
+// wrapper's copy (npm, pnpm and npx pass Ctrl-C on) and is ignored; any
+// other request exits at once, as does one after the wait.
 export const waitForTermination = (
-    stop: (signal: AbortSignal) => Promise<void>,
+    stop: (shutdown: MountShutdown) => Promise<void>,
     host: Pick<NodeJS.Process, "on" | "off" | "exit"> = process,
     input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin
 ) =>
     new Promise<void>((resolve, reject) => {
         const abort = new AbortController();
-        const signals = ["SIGINT", "SIGTERM", "SIGBREAK"] as const;
+        const shutdown: MountShutdown = {
+            signal: abort.signal,
+            phase: 0,
+            exit: () => host.exit(process.exitCode || 130),
+        };
+        const signals = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] as const;
         const keepAlive = setInterval(() => {}, 1 << 30);
+        let phase = 0;
         let requests = 0;
         const request = () => {
-            if (++requests > 2) host.exit(130);
-            if (requests > 1)
+            if (phase !== shutdown.phase)
+                [phase, requests] = [shutdown.phase, 0];
+            if (++requests === 2) return;
+            if (requests > 2 || phase > 1) return shutdown.exit();
+            if (phase)
                 return abort.abort(new Error("shutdown requested again"));
-            stop(abort.signal)
+            // A closed terminal (SIGHUP) fails every write: ignore that.
+            for (const stream of [process.stdout, process.stderr])
+                stream.off("error", ignore).on("error", ignore);
+            stop(shutdown)
                 .finally(() => {
                     clearInterval(keepAlive);
                     for (const name of signals) host.off(name, request);
@@ -470,11 +496,15 @@ export const waitForTermination = (
         if (!input.isTTY) input.on("data", onData);
     });
 
-// --persist-on-exit. Sets the exit code: 75 when it gives up, 130 aborted.
+/** Unacknowledged paths listed one per line; one more line counts the rest. */
+const LISTED_PATHS = 200;
+
+// --persist-on-exit. Unless an exit code is set, sets 75 when it gives up;
+// aborted by a request, it lists what is left and exits at once (130).
 export const persistOnExit = async (
     fsHandle: Pick<SharedFsHandle, "pendingLocalWrites" | "persistLocalWrites">,
     options: { persistOnExit: boolean; persistTimeoutMs: number },
-    signal?: AbortSignal
+    shutdown?: MountShutdown
 ) => {
     if (!options.persistOnExit) return;
     const timeout = options.persistTimeoutMs;
@@ -487,11 +517,12 @@ export const persistOnExit = async (
     }
     if (!entries) return;
     log(`waiting up to ${timeout} ms for receipts for ${entries} entries`);
+    if (shutdown) shutdown.phase = 1;
     const started = Date.now();
     try {
         const acknowledged = await fsHandle.persistLocalWrites({
             timeout,
-            signal,
+            signal: shutdown?.signal,
         });
         log(
             `${acknowledged} entries acknowledged in ${Date.now() - started} ms`
@@ -500,10 +531,17 @@ export const persistOnExit = async (
         const byPath = new Map<string | null, string[]>();
         for (const { id, path = null } of error?.unacknowledged ?? [])
             byPath.set(path, [...(byPath.get(path) ?? []), id]);
+        let listed = 0;
         for (const [path, ids] of byPath)
-            log(`unacknowledged ${JSON.stringify({ path, ids })}`);
+            if (++listed <= LISTED_PATHS)
+                log(`unacknowledged ${JSON.stringify({ path, ids })}`);
+        if (listed > LISTED_PATHS)
+            log(`unlisted ${JSON.stringify({ paths: listed - LISTED_PATHS })}`);
         log(`gave up: ${error?.message ?? error}`);
-        process.exitCode = signal?.aborted ? 130 : 75;
+        process.exitCode ||= shutdown?.signal.aborted ? 130 : 75;
+        if (shutdown?.signal.aborted) shutdown.exit();
+    } finally {
+        if (shutdown) shutdown.phase = 2;
     }
 };
 
@@ -1575,6 +1613,15 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     argv.persistTimeoutMs,
                     "--persist-timeout-ms"
                 );
+                // yargs reads --persist-on-exit=30000 as false.
+                const valued = args.find((arg) =>
+                    /^--persist-on-exit=(?!(true|false)$)/.test(arg)
+                );
+                if (valued) {
+                    throw new Error(
+                        `${valued}: --persist-on-exit takes no value; set the wait with --persist-timeout-ms`
+                    );
+                }
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
@@ -1609,12 +1656,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | ReturnType<typeof createSharedFsMountBackend>
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
+                let fsHandle!: Awaited<ReturnType<typeof openCliFs>>;
                 try {
                     const unreachable = await connectMountToNetwork(
                         peerbit,
                         argv
                     );
-                    const fsHandle = await openCliFs(peerbit, {
+                    fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
                         replicate: true,
@@ -1686,17 +1734,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                             ? `gc schedule: on${gcSchedule.nextRunAtMs ? ` (first run in ~${Math.max(0, Math.round((gcSchedule.nextRunAtMs - Date.now()) / 60000))}m)` : ""}`
                             : "gc schedule: off"
                     );
-                    await waitForTermination((signal) =>
-                        stopMountSession({
-                            mounted,
-                            ipc,
-                            backend,
-                            profileWriter,
-                            persist: () =>
-                                persistOnExit(fsHandle, argv, signal),
-                            stopPeerbit: () => stopPeerbitForCli(peerbit),
-                        })
-                    );
                 } catch (error) {
                     await stopMountSession(
                         {
@@ -1710,6 +1747,16 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     );
                     throw error;
                 }
+                await waitForTermination((shutdown) =>
+                    stopMountSession({
+                        mounted,
+                        ipc,
+                        backend,
+                        profileWriter,
+                        persist: () => persistOnExit(fsHandle, argv, shutdown),
+                        stopPeerbit: () => stopPeerbitForCli(peerbit),
+                    })
+                );
             }
         )
         .command(
