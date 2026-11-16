@@ -41,7 +41,11 @@ import {
     type ProgramInitializationOptions,
 } from "@peerbit/program";
 import { RPC } from "@peerbit/rpc";
-import { TrustedNetwork } from "@peerbit/trusted-network";
+import {
+    TrustedNetwork,
+    getPathGenerator,
+    getToByFromLocalOnly,
+} from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
 import {
@@ -4737,7 +4741,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         const run = async () => {
             const own = this.node.identity.publicKey;
             const trusted = new Map<string, PublicSignKey>();
-            for (const key of await this.trustedWriters()) {
+            for (const key of await this.locallyTrustedWriters(context)) {
                 if (!key.equals(own)) trusted.set(key.hashcode(), key);
             }
             const keys = [...trusted.values()];
@@ -4771,6 +4775,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             });
         };
         void this.trackMaintenanceTask(run()).catch(() => {});
+    }
+
+    /**
+     * The keys this replica's trust graph trusts, from its local index
+     * only: the root, then each key a trusted key granted, walked as
+     * `TrustedNetwork.getTrusted()` walks them. getTrusted() also asks the
+     * graph's peers and waits out its search timeout for each one that
+     * does not answer, so close(), which joins this task, waited about two
+     * minutes once those peers had stopped. Stops early once `context`
+     * ends.
+     */
+    private async locallyTrustedWriters(
+        context: MaintenanceContext
+    ): Promise<PublicSignKey[]> {
+        const network = this.trustGraph!;
+        const keys = [network.rootTrust];
+        for await (const relation of getPathGenerator(
+            network.rootTrust,
+            network.trustGraph,
+            getToByFromLocalOnly
+        )) {
+            if (!this.maintenanceContextActive(context)) break;
+            keys.push(relation.to);
+        }
+        return keys;
     }
 
     /**

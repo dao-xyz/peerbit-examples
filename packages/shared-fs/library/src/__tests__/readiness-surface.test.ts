@@ -799,6 +799,93 @@ describe("write readiness surface (PR-4)", () => {
         });
     });
 
+    it("writers-unheard: close() does not wait for it once the other replicas of the trust graph stopped", async () => {
+        const ownerPeer = await createPeer();
+        const owner = await openSharedFs({
+            peerbit: ownerPeer,
+            machineLabel: "surface-owner",
+            rootKey: ownerPeer.identity.publicKey,
+            gc: false,
+        });
+        await owner.writeFile("/owner.txt", "from the owner");
+        const writerPeer = await createPeer();
+        await writerPeer.dial(ownerPeer);
+        const writer = await openSharedFs({
+            peerbit: writerPeer,
+            address: owner.address,
+            machineLabel: "surface-writer",
+            allowPartialWrites: true,
+            bootstrap: false,
+            gc: false,
+        });
+        await owner.authorizeWriter(writerPeer.identity.publicKey);
+        await untilEvent(
+            programOf(writer).trustGraph.trustGraph.events,
+            "change",
+            () => writer.isTrustedWriter(writerPeer.identity.publicKey)
+        );
+        await writer.writeFile("/writer.txt", "from the writer");
+        const joinerPeer = await createPeer();
+        await owner.authorizeWriter(joinerPeer.identity.publicKey);
+        await joinerPeer.dial(writerPeer);
+        // The report starts at J's flip, right after its write-ready
+        // telemetry. From then on O and X, the other replicas of the
+        // trust graph, leave J's trust-graph searches unanswered, and
+        // then they stop: each search the report sends goes to replicas
+        // that stop before they answer. Without that, it happens only in
+        // the runs where the stops overtake the search.
+        let flipped = false;
+        for (const fs of [owner, writer]) {
+            const index = programOf(fs).trustGraph.trustGraph.index;
+            const handle = index.handleSearchRequest.bind(index);
+            index.handleSearchRequest = async (
+                query: unknown,
+                context: { from: PublicSignKey }
+            ) =>
+                flipped && context.from.equals(joinerPeer.identity.publicKey)
+                    ? undefined
+                    : handle(query, context);
+        }
+        const joiner = await joinDonor(
+            { peer: ownerPeer, fs: owner },
+            {
+                peer: joinerPeer,
+                label: "surface-acl-joiner",
+                onTelemetry: (event) => {
+                    if (event.type === "write-ready") flipped = true;
+                },
+            }
+        );
+        await joiner.fs.awaitWriteReady({ timeout: 60_000 });
+        expect(joiner.fs.bootstrapStatus().writeReadinessSource).toBe(
+            "reconciled"
+        );
+        for (const peer of [ownerPeer, writerPeer]) {
+            peers.splice(peers.indexOf(peer), 1);
+        }
+        await Promise.all([ownerPeer.stop(), writerPeer.stop()]);
+
+        // A report that reads the trust graph through those peers holds
+        // this close until its searches time out: 1.5 to 2 minutes. A
+        // close takes well under a second; the bound only gives up.
+        const boundMs = 30_000;
+        const started = performance.now();
+        let giveUp: ReturnType<typeof setTimeout> | undefined;
+        const outcome = await Promise.race([
+            programOf(joiner.fs)
+                .close()
+                .then(() => "closed"),
+            new Promise<string>((resolve) => {
+                giveUp = setTimeout(() => resolve("still closing"), boundMs);
+            }),
+        ]);
+        clearTimeout(giveUp);
+        expect(
+            outcome,
+            `J's close after ${(performance.now() - started).toFixed(0)} ms`
+        ).toBe("closed");
+    });
+
     it("writers-unheard checks at most 1024 trusted keys besides this peer's own and says when it cut the list", async () => {
         const own = (await Ed25519Keypair.create()).publicKey;
         const others = await Promise.all(
@@ -820,7 +907,7 @@ describe("write readiness surface (PR-4)", () => {
                     node: { identity: { publicKey: own } },
                     maintenanceContextIfActive: () => ({}),
                     maintenanceContextActive: () => true,
-                    trustedWriters: async () => keys,
+                    locallyTrustedWriters: async () => keys,
                     readLocalIndex: async (query: any[]) => {
                         read.push(query[0].value);
                         return false;
