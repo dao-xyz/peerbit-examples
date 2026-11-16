@@ -48,7 +48,7 @@ describe("cold-start hold diagnosis", () => {
         ).toEqual({
             code: "A",
             name: "hold detection did not fire",
-            text: "the label was in the joiner's log and index at the bound and a change event carried it at 1.2 s, but no store check released the hold (1 checks; the last, at 1.2 s, read in log true, in index error)",
+            text: "the label was in the joiner's log and index at the bound and a change event carried it at 1.2 s, but no store check released the hold (store checks: 1; the last, at 1.2 s, read in log true, in index error)",
         });
         expect(classifyHold(facts({ atBound: stored })).text).toBe(
             "the label was in the joiner's log and index at the bound, but no change event carried it, so the hold never checked the store"

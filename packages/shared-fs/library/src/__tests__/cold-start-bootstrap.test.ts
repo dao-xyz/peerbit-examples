@@ -163,25 +163,27 @@ describe("shared fs cold-start bootstrap", () => {
     };
 
     /**
-     * Holds `peer`'s next filesystem store open until replicated history
-     * matching `matches` has been committed to it (a slow open, as on a
-     * loaded machine), so its bootstrap decides over a store this open
-     * filled. By default the hold sits after the whole Documents open; with
-     * `inLog` it sits right after the store's log opened, before the rest of
-     * Documents.open has run.
+     * Holds `peer`'s next filesystem store open (a slow open, as on a loaded
+     * machine) until the store holds a replicated document matching
+     * `matches`, so its bootstrap decides over a store this open filled. The
+     * store holds a document once it has its entry in the log and its row in
+     * the index; one matching document is enough. With `until`, the hold
+     * also waits until `until` reads true of the store. By default the hold
+     * sits after the whole Documents open; with `inLog` it sits right after
+     * the store's log opened, before the rest of Documents.open has run.
      *
-     * A matching document is committed once the store holds it: its entry
-     * in the log and its row in the index. Each change event and each commit
-     * diagnostic checks the matches seen so far, so the hold releases
-     * however the history arrived, and never on a change event alone.
-     * Documents dispatches a change event after it wrote the event's rows to
-     * the index, and every join puts the entry in the log before that, so a
-     * matching change event's own check finds it. Only batch joins emit a
+     * Each change event and each commit diagnostic reads the store for the
+     * matches seen so far, then `until`, so the hold releases however the
+     * history arrived, and never on a change event alone. Documents
+     * dispatches a change event after it wrote the event's rows to the index,
+     * and every join puts the entry in the log before that, so a change
+     * event's own check finds what it carried. Only batch joins emit a
      * commit diagnostic (log.joinPreparedFacts.change,
      * log.joinIndependent.change): an entry that arrives in plain exchange
-     * heads is joined on its own and emits none.
-     * With `diagnose` (the donor and the label it wrote), a hold that sits
-     * out its bound fails with the reason (cold-start-hold-diagnosis.ts).
+     * heads is joined on its own, with its own change event, and emits none.
+     * With `diagnose` (the donor and the label it wrote; no `until`, as the
+     * diagnosis judges by the label alone), a hold that sits out its bound
+     * fails with the reason (cold-start-hold-diagnosis.ts).
      */
     const holdOpenUntilHistory = (
         peer: Peerbit,
@@ -189,6 +191,7 @@ describe("shared fs cold-start bootstrap", () => {
             value instanceof FileVersion,
         options: {
             inLog?: boolean;
+            until?: (store: Documents<any, any>) => Promise<boolean>;
             diagnose?: {
                 donor: { peer: Peerbit; fs: SharedFsHandle };
                 label: Label;
@@ -198,9 +201,6 @@ describe("shared fs cold-start bootstrap", () => {
         const documentsOpen = Documents.prototype.open;
         const held = {
             arrived: false,
-            /** Change events, and those matching `matches`, during the hold. */
-            changes: 0,
-            batches: 0,
             restore: () => spy.mockRestore(),
         };
         const spy = vi
@@ -222,15 +222,19 @@ describe("shared fs cold-start bootstrap", () => {
                 const arrived = new Promise<void>(
                     (resolve) => (committed = resolve)
                 );
+                /** A matching document is in the store. */
                 let stored = false;
+                let released = false;
                 /** Matching documents from change events: entry hash to id. */
                 const matched = new Map<string, string>();
                 const tryRead = (value: Promise<boolean>) =>
                     value.catch(() => "error" as const);
+                const readUntil = async () =>
+                    options.until ? options.until(this) : true;
                 const check = async () => {
                     for (const [hash, id] of [...matched]) {
                         if (stored) {
-                            return;
+                            break;
                         }
                         const [inLog, inIndex] = await Promise.all([
                             tryRead(logHas(this, hash)),
@@ -239,16 +243,20 @@ describe("shared fs cold-start bootstrap", () => {
                         diagnosis?.onCheck(hash, inLog, inIndex);
                         if (inLog === true && inIndex === true) {
                             stored = true;
-                            committed();
                         }
                     }
+                    if (
+                        !stored ||
+                        released ||
+                        (await tryRead(readUntil())) !== true
+                    ) {
+                        return;
+                    }
+                    released = true;
+                    committed();
                 };
                 const onChange = (event: any) => {
                     const added = (event?.detail?.added ?? []).filter(matches);
-                    held.changes++;
-                    if (added.length > 0) {
-                        held.batches++;
-                    }
                     for (const value of added) {
                         const hash = value?.__context?.head;
                         if (typeof hash === "string" && value.id) {
@@ -2201,25 +2209,57 @@ describe("shared fs cold-start bootstrap", () => {
     });
 
     it("makes a joiner whose whole store arrived during its open ready after one answer", async () => {
-        // A quiet donor: what it wrote reaches the joiner in one batch,
-        // before the joiner's open resolves. Nothing else arrives later, so
-        // only the readiness session can make it ready.
+        // A quiet donor: what it wrote reaches the joiner before the
+        // joiner's open resolves, in one batch, or entry by entry when the
+        // donor sends plain exchange heads (it has not yet seen the joiner's
+        // sync capabilities). Nothing else arrives later, so only the
+        // readiness session can make it ready.
         const donorPeer = await createPeer();
         const donor = await openSharedFs({
             peerbit: donorPeer,
             machineLabel: "late-commit-donor",
         });
         await donor.writeFile("/quiet.txt", "quiet");
+        // The donor's whole store: every entry of its log and every row of
+        // its index.
+        const donorStore = (donor.program as any).entries;
+        const hashes: string[] = (await donorStore.log.log.toArray()).map(
+            (entry: { hash: string }) => entry.hash
+        );
+        const ids: string[] = (
+            await donorStore.index
+                .iterate(
+                    { query: [] },
+                    { local: true, remote: false, resolve: false }
+                )
+                .all()
+        ).map((row: { id: string }) => row.id);
+        const holdsDonorStore = async (store: Documents<any, any>) => {
+            for (const hash of hashes) {
+                if (!(await logHas(store, hash))) {
+                    return false;
+                }
+            }
+            for (const id of ids) {
+                if (!(await indexHas(store, id))) {
+                    return false;
+                }
+            }
+            return true;
+        };
         const joinerPeer = await createPeer();
         await joinerPeer.dial(donorPeer);
 
-        // The joiner's store open resolves after that batch committed.
+        // The joiner's store open resolves once that store holds all of the
+        // donor's: when the entries arrive one by one, the first one
+        // committed does not release it.
         const held = holdOpenUntilHistory(
             joinerPeer,
             (value) =>
                 value instanceof NamingEvent ||
                 value instanceof FileVersion ||
-                value instanceof BootstrapManifest
+                value instanceof BootstrapManifest,
+            { until: holdsDonorStore }
         );
         let joiner: SharedFsHandle;
         try {
@@ -2232,7 +2272,7 @@ describe("shared fs cold-start bootstrap", () => {
         } finally {
             held.restore();
         }
-        expect(held).toMatchObject({ arrived: true, changes: 1, batches: 1 });
+        expect(held.arrived).toBe(true);
         expect(decode(await joiner.readFile("/quiet.txt"))).toBe("quiet");
         await joiner.awaitWriteReady({ timeout: 20_000 });
         // One session, one round trip, nothing pulled (design test 7).

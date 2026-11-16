@@ -171,7 +171,7 @@ export const classifyHold = (facts: HoldFacts): HoldClass => {
             text: by(facts.committedAt)
                 ? `a store check found the label in the joiner's log and index at ${seconds(facts.committedAt)}, but the hold had not released by the bound`
                 : by(facts.changedAt)
-                  ? `the label was in the joiner's log and index at the bound and a change event carried it at ${seconds(facts.changedAt)}, but no store check released the hold (${facts.checks} checks${last ? `; the last, at ${seconds(last.at)}, read in log ${last.inLog}, in index ${last.inIndex}` : ""})`
+                  ? `the label was in the joiner's log and index at the bound and a change event carried it at ${seconds(facts.changedAt)}, but no store check released the hold (store checks: ${facts.checks}${last ? `; the last, at ${seconds(last.at)}, read in log ${last.inLog}, in index ${last.inIndex}` : ""})`
                   : "the label was in the joiner's log and index at the bound, but no change event carried it, so the hold never checked the store",
         };
     }
