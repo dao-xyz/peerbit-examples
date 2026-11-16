@@ -9,6 +9,7 @@ on:
 permissions:
     actions: write
     contents: write
+    # npm trusted publishing and provenance use this job's OIDC id-token.
     id-token: write
     pull-requests: write
 
@@ -36,10 +37,12 @@ jobs:
               with:
                   run_install: false
 
+            # npm trusted publishing needs npm 11.5.1 or later, which Node 24.5.0
+            # and later bundle; Node 22 bundles npm 10.
             - name: Setup Node
               uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
               with:
-                  node-version: 22
+                  node-version: 24
                   cache: pnpm
                   cache-dependency-path: pnpm-lock.yaml
                   registry-url: https://registry.npmjs.org
@@ -56,6 +59,16 @@ jobs:
                   commit: Version Packages
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  # npm publishes with npm trusted publishing. Each package's
+                  # trusted publisher on npmjs.com names this repository and
+                  # release.yml, has no environment, and allows npm publish.
+                  # While the NPM_TOKEN secret is set, every command in this
+                  # step can read it. npm sends it with the step's other
+                  # registry requests, such as npm view, and publishes with
+                  # it without a warning when the OIDC exchange fails. Once a
+                  # release has published through trusted publishing, delete
+                  # the secret; both variables are then empty. If nothing
+                  # else uses the token, revoke it on npmjs.com.
                   NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
                   NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
                   NPM_CONFIG_PROVENANCE: true

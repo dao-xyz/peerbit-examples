@@ -1,11 +1,22 @@
 #!/usr/bin/env node
 
+// Publishes every package version under packages/ that is not on npm yet,
+// with `pnpm changeset publish` (pnpm packs each package and hands the
+// tarball to the npm CLI on PATH). The Release workflow runs it once the
+// Version Packages pull request has merged.
+//
+// npm authentication: npm trusted publishing, which needs no secret, with an
+// npm token in NPM_TOKEN or NODE_AUTH_TOKEN as an optional fallback. See
+// release-packages-auth.mjs. Before it creates the native adapter release or
+// builds anything, the script refuses to run when neither can publish.
+
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { npmPublishAuth } from "./release-packages-auth.mjs";
 
 const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -97,8 +108,18 @@ const capture = (command, args, options = {}) => {
     };
 };
 
-const hasNpmToken = () =>
-    Boolean(process.env.NODE_AUTH_TOKEN || process.env.NPM_TOKEN);
+const npmVersion = () => {
+    const result = capture("npm", ["--version"]);
+    return result.ok ? result.stdout.trim() : undefined;
+};
+
+const requirePublishAuth = () => {
+    const auth = npmPublishAuth(process.env, npmVersion());
+    if (!auth.ok) {
+        throw new Error(auth.reason);
+    }
+    return auth;
+};
 
 const githubToken = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
 
@@ -471,17 +492,12 @@ const publishDryRun = (packages) => {
 };
 
 const publishPackages = (unpublished) => {
-    if (!dryRun && !hasNpmToken()) {
-        throw new Error(
-            "NPM_TOKEN or NODE_AUTH_TOKEN is required to publish packages."
-        );
-    }
-
     if (dryRun) {
         publishDryRun(unpublished);
         return;
     }
 
+    const auth = requirePublishAuth();
     try {
         run("pnpm", ["changeset", "publish"]);
     } catch (error) {
@@ -497,6 +513,17 @@ const publishPackages = (unpublished) => {
                 .map((pkg) => `${pkg.name}@${pkg.version}`)
                 .join(", ")}`
         );
+        if (auth.trustedPublishing) {
+            console.error(
+                [
+                    "Check the trusted publisher of each package above on npmjs.com.",
+                    `It must name the repository ${repo} and the workflow file that runs this script.`,
+                    "It must have no environment, and it must allow npm publish.",
+                    "A new trusted publisher expires if it has not published within 2 days.",
+                    "For a package without a trusted publisher, npm publishes with the npm token if one is set, and otherwise fails with ENEEDAUTH.",
+                ].join("\n")
+            );
+        }
         throw error;
     }
 };
@@ -519,10 +546,8 @@ if (dryRun && unpublished.length === 0) {
     process.exit(0);
 }
 
-if (!dryRun && !hasNpmToken()) {
-    throw new Error(
-        "NPM_TOKEN or NODE_AUTH_TOKEN is required to publish packages."
-    );
+if (!dryRun) {
+    console.log(`Publishing with ${requirePublishAuth().summary}.`);
 }
 
 console.log(

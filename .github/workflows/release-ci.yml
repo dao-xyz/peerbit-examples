@@ -1,0 +1,46 @@
+name: Release CI
+
+on:
+    pull_request:
+        paths:
+            - ".github/workflows/release.yml"
+            - ".github/workflows/release-ci.yml"
+            - "scripts/release-packages*.mjs"
+    push:
+        branches: [master]
+        paths:
+            - ".github/workflows/release.yml"
+            - ".github/workflows/release-ci.yml"
+            - "scripts/release-packages*.mjs"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+    release-script:
+        name: Release script tests
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  persist-credentials: false
+
+            # The Node the Release workflow publishes with.
+            - name: Setup Node
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+              with:
+                  node-version: 24
+
+            - name: Check release script syntax
+              run: node --check scripts/release-packages.mjs
+
+            # The second file runs the release script with stub npm and pnpm.
+            - name: Test npm publish authentication
+              run: node --test scripts/release-packages-auth.test.mjs scripts/release-packages.test.mjs
