@@ -1,6 +1,13 @@
 import { VitestTestRunner } from "vitest/runners";
 import { firstFailureEvidence } from "./error-evidence.mjs";
 
+// A first failure's stack is often the only record of which call failed,
+// and V8 keeps 10 frames by default: a failure inside a shared helper
+// (readiness-trust 35 + M1, macOS CI) lost every frame above the helper's
+// retry loop, so its log could not say which step called it. Every worker
+// of the strict gate loads this runner before any test file.
+Error.stackTraceLimit = Math.max(Error.stackTraceLimit, 50);
+
 const MAX_TEXT = 16_384;
 
 function bounded(value) {
