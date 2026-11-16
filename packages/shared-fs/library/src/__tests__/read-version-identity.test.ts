@@ -14,7 +14,6 @@ import {
 } from "../index.js";
 import { stopTestPeers } from "./stop-test-peers.js";
 
-const encode = (value: string) => new TextEncoder().encode(value);
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
 
@@ -64,7 +63,10 @@ const failChunks = (
                 return original(id, normalizedPath);
             }
             if (mode === "tampered") {
-                return { id, bytes: encode("tampered bytes") };
+                // Same length: only the hash can tell (a length change
+                // fails the size check first; see ingest-bounds.test.ts).
+                const { bytes } = await original(id, normalizedPath);
+                return { id, bytes: bytes.map((byte: number) => byte ^ 1) };
             }
             throw new SharedFsError(
                 "EIO",

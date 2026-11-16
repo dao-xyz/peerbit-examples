@@ -74,6 +74,21 @@ func TestErrnoMapsRetryableReadiness(t *testing.T) {
 	}
 }
 
+// Name and size limits reach the kernel as themselves, not as EIO.
+func TestErrnoMapsNameAndSizeLimits(t *testing.T) {
+	for code, want := range map[string]int{
+		"ENAMETOOLONG": -fuse.ENAMETOOLONG,
+		"EFBIG":        -fuse.EFBIG,
+	} {
+		if got := errno(&ipcError{Code: code, Message: code}); got != want {
+			t.Fatalf("%s: expected %d, got %d", code, want, got)
+		}
+		if name := errnoName(want); name != code {
+			t.Fatalf("errnoName(%d) = %q, expected %q", want, name, code)
+		}
+	}
+}
+
 // Linux caches names for up to 0.1 s, so Open can see ENOENT for a name
 // another peer just removed. Only Linux answers ESTALE, which makes the
 // kernel retry the open with a fresh lookup (and create the file for O_CREAT).

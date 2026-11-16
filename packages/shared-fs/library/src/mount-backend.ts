@@ -1,4 +1,5 @@
 import {
+    DEFAULT_FILE_CHUNK_SIZE,
     SharedFsCreateParentMismatchError,
     SharedFsError,
     SharedFsExpectedNamespaceMismatchError,
@@ -14,6 +15,7 @@ import {
     type WriteFileOptions,
 } from "./index.js";
 import { CONFLICTS_STAMP_KEY, DirectoryStamps } from "./directory-stamps.js";
+import { MAX_FILE_VERSION_CHUNKS } from "./model.js";
 import {
     CONFLICTS_DIR,
     ROOT_NODE_ID,
@@ -21,6 +23,8 @@ import {
     decodeConflictPathName,
     dirname,
     encodeConflictPathName,
+    fsNameError,
+    fsNameErrorMessage,
     joinFsPath,
     normalizeFsPath,
     pathSegments,
@@ -298,7 +302,9 @@ export type SharedFsBackendErrorCode =
     | "EINVAL"
     | "EACCES"
     | "EBADF"
-    | "EROFS";
+    | "EROFS"
+    | "ENAMETOOLONG"
+    | "EFBIG";
 
 export class SharedFsBackendError extends Error {
     constructor(
@@ -653,6 +659,25 @@ const parseConflictPath = (path: string) => {
 const notFound = (path: string) =>
     new SharedFsBackendError("ENOENT", `Path does not exist: ${path}`);
 
+/**
+ * A kernel path as a library path. A POSIX name may hold "\", which
+ * normalizeFsPath reads as "/", so the name would alias another path:
+ * creating or renaming one fails with EINVAL and looking one up with ENOENT
+ * (no name stored under these rules holds "\"; WinFsp already hands the
+ * adapter "/" separators).
+ */
+const kernelPath = (path: string, creates = false) => {
+    if (path.includes("\\")) {
+        throw creates
+            ? new SharedFsBackendError(
+                  "EINVAL",
+                  `A name cannot hold "\\": ${JSON.stringify(path)}`
+              )
+            : notFound(path);
+    }
+    return normalizeFsPath(path);
+};
+
 const alreadyExists = (path: string) =>
     new SharedFsBackendError("EEXIST", `Path already exists: ${path}`);
 
@@ -758,6 +783,14 @@ const mapWithBoundedConcurrency = async <T, R>(
 };
 
 const ensureMutableCapacity = (state: OpenFileState, capacity: number) => {
+    // Commits use the default chunk size: past this, writeFile would refuse.
+    const max = MAX_FILE_VERSION_CHUNKS * DEFAULT_FILE_CHUNK_SIZE;
+    if (capacity > max && capacity > state.length) {
+        throw new SharedFsBackendError(
+            "EFBIG",
+            `File of ${capacity} bytes exceeds the mount's ${max} bytes: ${state.path}`
+        );
+    }
     const borrowedSnapshot = state.borrowedCommitSnapshot;
     const borrowed = borrowedSnapshot?.buffer === state.buffer;
     if (!borrowed && state.buffer.byteLength >= capacity) {
@@ -2658,6 +2691,14 @@ export const createSharedFsMountBackend = (
                     if (!parsedFlags.create) {
                         throw notFound(normalized);
                     }
+                    // Refused here, not at the later commit.
+                    const invalid = fsNameError(basename(normalized));
+                    if (invalid) {
+                        throw new SharedFsBackendError(
+                            invalid,
+                            fsNameErrorMessage(invalid, basename(normalized))
+                        );
+                    }
                     createIntent = reserveCreateIntent(
                         normalized,
                         parsedFlags.exclusive
@@ -2839,7 +2880,7 @@ export const createSharedFsMountBackend = (
     const backend: SharedFsMountBackend & { dispose(): void } = {
         async getattr(path: string) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path);
                 if (normalized === "/") {
                     return directoryStat("/", stamps.read(ROOT_NODE_ID));
                 }
@@ -2891,7 +2932,7 @@ export const createSharedFsMountBackend = (
 
         async readdir(path: string, options?: SharedFsReaddirOptions) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path);
                 const includeStats = options?.includeStats === true;
                 if (isConflictPath(normalized)) {
                     const parsed = parseConflictPath(normalized);
@@ -3085,13 +3126,14 @@ export const createSharedFsMountBackend = (
             flags?: SharedFsOpenFlags,
             createMode?: number
         ) {
-            return wrap(() =>
-                openPathAdmitted(
-                    normalizeFsPath(path),
-                    parseFlags(flags),
+            return wrap(() => {
+                const parsed = parseFlags(flags);
+                return openPathAdmitted(
+                    kernelPath(path, parsed.create),
+                    parsed,
                     posixModeArg(createMode)
-                )
-            );
+                );
+            });
         },
 
         async read(handle: number, size: number, offset: number) {
@@ -3177,7 +3219,7 @@ export const createSharedFsMountBackend = (
                     resize(openHandle.state, size, targetRef);
                     return;
                 }
-                const normalized = normalizeFsPath(targetRef);
+                const normalized = kernelPath(targetRef);
                 assertWriteReady(`Truncate ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
@@ -3297,7 +3339,7 @@ export const createSharedFsMountBackend = (
 
         async mkdir(path: string) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path, true);
                 assertWriteReady(`mkdir ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
@@ -3345,7 +3387,7 @@ export const createSharedFsMountBackend = (
 
         async rmdir(path: string) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path);
                 assertWriteReady(`rmdir ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
@@ -3406,8 +3448,8 @@ export const createSharedFsMountBackend = (
 
         async rename(from: string, to: string) {
             return wrap(async () => {
-                const fromPath = normalizeFsPath(from);
-                const toPath = normalizeFsPath(to);
+                const fromPath = kernelPath(from, true);
+                const toPath = kernelPath(to, true);
                 assertWriteReady(`rename ${fromPath} to ${toPath}`);
                 if (isConflictPath(fromPath) || isConflictPath(toPath)) {
                     throw new SharedFsBackendError(
@@ -3602,7 +3644,7 @@ export const createSharedFsMountBackend = (
 
         async unlink(path: string) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path);
                 assertWriteReady(`unlink ${normalized}`);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
@@ -3695,7 +3737,7 @@ export const createSharedFsMountBackend = (
                         ? undefined
                         : regularMode(posixMode);
                 const { mtimeMs } = attrs;
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path);
                 if (normalized === "/") return;
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
@@ -3817,7 +3859,7 @@ export const createSharedFsMountBackend = (
 
         async symlink(linkTarget: string, path: string) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path, true);
                 if (normalized === "/") throw alreadyExists(normalized);
                 if (isConflictPath(normalized)) {
                     throw new SharedFsBackendError(
@@ -3861,7 +3903,7 @@ export const createSharedFsMountBackend = (
 
         async readlink(path: string) {
             return wrap(async () => {
-                const normalized = normalizeFsPath(path);
+                const normalized = kernelPath(path);
                 const notLink = () =>
                     new SharedFsBackendError(
                         "EINVAL",

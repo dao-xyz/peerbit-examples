@@ -1,6 +1,41 @@
 export const ROOT_NODE_ID = "root";
 export const CONFLICTS_DIR = ".peerbit-conflicts";
 
+/** The longest file or directory name, in UTF-8 bytes (NAME_MAX). */
+export const MAX_NAME_BYTES = 255;
+
+const utf8 = new TextEncoder();
+// C0 controls, DEL, a backslash (a path reads it as "/"), and lone
+// surrogates (they have no UTF-8 form).
+// eslint-disable-next-line no-control-regex
+const BAD_NAME_CHAR = /[\u0000-\u001f\u007f\\]|\p{Cs}/u;
+
+/**
+ * Why `name` cannot name a file or directory, or undefined when it can:
+ * ENAMETOOLONG past MAX_NAME_BYTES, EINVAL when empty, "." or "..", or
+ * holding "/" or a BAD_NAME_CHAR. Ingest and local writes share it.
+ */
+export const fsNameError = (name: string) =>
+    name.length > MAX_NAME_BYTES ||
+    utf8.encode(name).byteLength > MAX_NAME_BYTES
+        ? ("ENAMETOOLONG" as const)
+        : name === "" ||
+            name === "." ||
+            name === ".." ||
+            name.includes("/") ||
+            BAD_NAME_CHAR.test(name)
+          ? ("EINVAL" as const)
+          : undefined;
+
+/** The message for fsNameError's `code`. */
+export const fsNameErrorMessage = (
+    code: "ENAMETOOLONG" | "EINVAL",
+    name: string
+) =>
+    code === "ENAMETOOLONG"
+        ? `Name is longer than ${MAX_NAME_BYTES} bytes of UTF-8: ${name.slice(0, 32)}...`
+        : `Name is empty, "." or "..", or holds "/", "\\", a control character or a lone surrogate: ${JSON.stringify(name)}`;
+
 export const normalizeFsPath = (input: string) => {
     const raw = input || "/";
     const parts = raw

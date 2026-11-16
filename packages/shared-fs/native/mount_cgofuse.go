@@ -764,6 +764,10 @@ func errno(err error) int {
 			return -fuse.ENOTEMPTY
 		case "EROFS":
 			return -fuse.EROFS
+		case "ENAMETOOLONG":
+			return -fuse.ENAMETOOLONG
+		case "EFBIG":
+			return -fuse.EFBIG
 		}
 	}
 	fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %v\n", err)
@@ -799,6 +803,10 @@ func errnoName(result int) string {
 		return "ENOTEMPTY"
 	case fuse.EROFS:
 		return "EROFS"
+	case fuse.ENAMETOOLONG:
+		return "ENAMETOOLONG"
+	case fuse.EFBIG:
+		return "EFBIG"
 	case fuse.ENOSYS:
 		return "ENOSYS"
 	}
