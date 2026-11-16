@@ -2,9 +2,11 @@ import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     CONFLICTS_DIR,
+    FileVersion,
     NamingEvent,
     createSharedFsMountBackend,
     openSharedFs,
+    topMostUnreachable,
     type SharedFsHandle,
     type SharedFsMountBackend,
 } from "../index.js";
@@ -115,6 +117,35 @@ const winnerOf = async (fs: SharedFsHandle, path: string) =>
         nodeId: string;
         causalDepth: bigint;
     };
+
+/** Another writer's first version of node `nodeId`: the bytes at `donor`. */
+const versionOf = async (
+    fs: SharedFsHandle,
+    donor: string,
+    nodeId: string,
+    id: string
+) => {
+    const [head] = (await fs.stat(donor))!.headVersionIds!;
+    const bytes = (await fs.program.entries.index.get(head, {
+        local: true,
+        remote: false,
+        resolve: true,
+    })) as unknown as FileVersion;
+    return new FileVersion({
+        id,
+        nodeId,
+        parentVersionIds: [],
+        causalDepth: 1n,
+        contentHash: bytes.contentHash,
+        size: bytes.size,
+        mode: bytes.mode,
+        mtime: bytes.mtime,
+        chunkIds: bytes.chunkIds,
+        createdAt: 2n,
+        authorKey: "remote",
+        machineLabel: "desktop",
+    });
+};
 
 describe("mount conflict tree", () => {
     let peer: Peerbit;
@@ -299,6 +330,181 @@ describe("mount conflict tree", () => {
         expect(naming).toHaveBeenCalledTimes(2);
     });
 
+    it("checks only the entry a lookup names while other files change, and scans to list", async () => {
+        const base = await fs.writeFile("/c.txt", "base");
+        const heads: string[] = [];
+        for (const side of ["left", "right"]) {
+            heads.push(
+                (
+                    await fs.writeFile("/c.txt", side, {
+                        baseVersionIds: [base.id],
+                    })
+                ).id
+            );
+        }
+        await fs.writeFile("/dup.txt", "first life");
+        const first = (await fs.stat("/dup.txt"))!.nodeId;
+        await fs.rm("/dup.txt");
+        await fs.writeFile("/dup.txt", "second life");
+        await fs.resolveNamingConflict(first, { type: "restore" });
+        const conflicts = vi.spyOn(fs, "conflicts");
+        const naming = vi.spyOn(fs, "namingConflicts");
+        const mount = createSharedFsMountBackend(fs);
+        const names = await namesOf(mount, root);
+        expect(names.map((name) => name.split(" ")[0])).toEqual([
+            "content",
+            "content",
+            "duplicate-name",
+        ]);
+        const bytes = new Map<string, string>();
+        for (const name of names) {
+            bytes.set(name, await readThrough(mount, `${root}/${name}`));
+        }
+        let changes = 0;
+        const elsewhere = () =>
+            fs.writeFile(`/elsewhere-${changes++}.txt`, "x");
+
+        // A create elsewhere before each lookup, open and read: each checks
+        // its own entry, and none scans.
+        for (const name of names) {
+            await elsewhere();
+            expect(await mount.getattr(`${root}/${name}`)).toMatchObject({
+                kind: "file",
+                size: bytes.get(name)!.length,
+            });
+            await elsewhere();
+            expect(await readThrough(mount, `${root}/${name}`)).toBe(
+                bytes.get(name)
+            );
+        }
+        // Names no entry can have (Finder's and Explorer's probes among
+        // them) are missing without a look.
+        await elsewhere();
+        for (const probe of [
+            ".DS_Store",
+            `._${names[0]}`,
+            "desktop.ini",
+            "Thumbs.db",
+            "content",
+            `${names[0]}.swp`,
+        ]) {
+            await expect(
+                mount.getattr(`${root}/${probe}`)
+            ).rejects.toMatchObject({ code: "ENOENT" });
+        }
+        expect(conflicts).toHaveBeenCalledTimes(1);
+        expect(naming).toHaveBeenCalledTimes(1);
+
+        // A resolved conflict's entries are gone on their next lookup.
+        await fs.resolveConflict("/c.txt", heads[0]);
+        for (const name of names.slice(0, 2)) {
+            await expect(
+                mount.getattr(`${root}/${name}`)
+            ).rejects.toMatchObject({ code: "ENOENT" });
+        }
+        expect(conflicts).toHaveBeenCalledTimes(1);
+
+        // Listing scans, once per change.
+        expect(await namesOf(mount, root)).toEqual([names[2]]);
+        expect(await namesOf(mount, root)).toEqual([names[2]]);
+        expect(conflicts).toHaveBeenCalledTimes(2);
+
+        // A name of the right form the last scan lacks may be a new entry:
+        // after a change it scans, then the scan answers.
+        await elsewhere();
+        const unknown = `content nothing.txt laptop 20261116T000000Z ${"0".repeat(12)}.txt`;
+        for (let i = 0; i < 2; i++) {
+            await expect(
+                mount.getattr(`${root}/${unknown}`)
+            ).rejects.toMatchObject({ code: "ENOENT" });
+        }
+        expect(conflicts).toHaveBeenCalledTimes(3);
+        expect(naming).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps a content entry's name when a chmod or touch replaces its head", async () => {
+        const base = await fs.writeFile("/c.txt", "base");
+        for (const side of ["left", "right"]) {
+            await fs.writeFile("/c.txt", side, { baseVersionIds: [base.id] });
+        }
+        const mount = createSharedFsMountBackend(fs);
+        const names = await namesOf(mount, root);
+        expect(names).toHaveLength(2);
+        const visible = await readThrough(mount, "/c.txt");
+
+        for (const patch of [{ mtimeMs: 1_700_000_000_000 }, { mode: 0o755 }]) {
+            const before = (await fs.stat("/c.txt"))!.versionId;
+            await mount.setattr("/c.txt", patch);
+            // A new head holds the same bytes: still the same two contents.
+            expect((await fs.stat("/c.txt"))!.versionId).not.toBe(before);
+            expect(await fs.conflicts("/c.txt")).toHaveLength(1);
+            for (const name of names) {
+                expect(await mount.getattr(`${root}/${name}`)).toMatchObject({
+                    kind: "file",
+                });
+            }
+            expect(await namesOf(mount, root)).toEqual(names);
+        }
+        expect(
+            (
+                await Promise.all(
+                    names.map((name) => readThrough(mount, `${root}/${name}`))
+                )
+            ).sort()
+        ).toEqual(["left", "right"]);
+        expect(await readThrough(mount, "/c.txt")).toBe(visible);
+    });
+
+    it("shows a hidden claimant once its first content lands, and not after its content leaves", async () => {
+        await fs.writeFile("/dup.txt", "visible");
+        await fs.writeFile("/donor.txt", "hidden claimant");
+        // Another writer's file claims the name; its naming lands first,
+        // and a file with no content is not shown.
+        const nodeId = "file:late-claimant";
+        await fs.program.entries.put(
+            new NamingEvent({
+                id: "naming:~late-claimant", // sorts last: it loses the name
+                nodeId,
+                parentId: "root",
+                name: "dup.txt",
+                parentNamingIds: [],
+                causalDepth: 1n,
+                createdAt: 2n,
+                authorKey: "remote",
+                machineLabel: "desktop",
+            }),
+            { unique: true }
+        );
+        const mount = createSharedFsMountBackend(fs);
+        // The scan looked the claimant up: its rows are warm now.
+        expect(await mount.readdir(root)).toEqual([]);
+
+        // Its first content: no naming change and no fork in that batch.
+        const version = await versionOf(
+            fs,
+            "/donor.txt",
+            nodeId,
+            "version:late"
+        );
+        await fs.program.entries.put(version, { unique: true });
+        const [name, ...others] = await namesOf(mount, root);
+        expect(others).toEqual([]);
+        expect(name).toMatch(
+            /^duplicate-name dup\.txt desktop 19700101T000000Z [0-9a-f]{12}\.txt$/
+        );
+        expect(await readThrough(mount, `${root}/${name}`)).toBe(
+            "hidden claimant"
+        );
+        expect(await readThrough(mount, "/dup.txt")).toBe("visible");
+
+        // Its only version leaves: hidden again, so its entry goes.
+        await fs.program.entries.del(version.id);
+        expect(await mount.readdir(root)).toEqual([]);
+        await expect(mount.getattr(`${root}/${name}`)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
     it("shows a move cycle once, from its least id, and stops browsing where it repeats", async () => {
         await fs.mkdir("/x");
         await fs.mkdir("/y");
@@ -354,6 +560,58 @@ describe("mount conflict tree", () => {
         await expect(
             mount.readdir(`${dir}/inside-${top}.txt`)
         ).rejects.toMatchObject({ code: "ENOTDIR" });
+    });
+});
+
+describe("top-most unreachable nodes", () => {
+    /** A parent map that counts its lookups. */
+    class Counted extends Map<string, string> {
+        lookups = 0;
+        get(key: string) {
+            this.lookups++;
+            return super.get(key);
+        }
+        has(key: string) {
+            this.lookups++;
+            return super.has(key);
+        }
+    }
+
+    it("are each chain's top, each cycle's least id, never a node below", () => {
+        const parents = new Counted([
+            ["c", "b"],
+            ["b", "a"],
+            ["a", "dir:deleted"],
+            ["t", "x"], // below the cycle x -> y -> z -> x
+            ["y", "z"],
+            ["x", "y"],
+            ["z", "x"],
+            ["s", "s"],
+        ]);
+        expect([...topMostUnreachable(parents)].sort()).toEqual([
+            "a",
+            "s",
+            "x",
+        ]);
+    });
+
+    it("take one pass, however deep a chain is", () => {
+        for (const order of ["top first", "top last"]) {
+            const n = 1000;
+            const chain = Array.from(
+                { length: n },
+                (_, i) =>
+                    [
+                        `n${String(i).padStart(4, "0")}`,
+                        i === 0 ? "gone" : `n${String(i - 1).padStart(4, "0")}`,
+                    ] as [string, string]
+            );
+            const parents = new Counted(
+                order === "top first" ? chain : chain.reverse()
+            );
+            expect([...topMostUnreachable(parents)]).toEqual(["n0000"]);
+            expect(parents.lookups).toBeLessThanOrEqual(6 * n);
+        }
     });
 });
 

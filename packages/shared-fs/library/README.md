@@ -1610,7 +1610,11 @@ link's target as text), size and mtime; a directory entry shows the hidden
 directory as it is now. A name gives the kind, the original path (`/` shown as
 `／`, cut at its start to fit), the writer (machine label, else `key-` and a
 hash of its key), the writer's UTC time, 12 hex digits of SHA-256 of the kind
-and id, and the original extension. Names are valid on Windows, macOS and Linux
+and id, and the original extension. A `content` or `delete-vs-edit` entry's id
+is its file and bytes, and its writer and time are those of the save that
+brought those bytes in, so a `chmod`, `touch` or recorded copy that keeps the
+bytes keeps the name; a node entry's id is the node, and its writer and time
+are those of its name. Names are valid on Windows, macOS and Linux
 (lookalikes replace characters a name cannot hold; at most 160 bytes), unique
 even ignoring case and the same on every replica. One changes only when its
 path does or, for a node entry, when the node is renamed again. Creating,
@@ -1622,11 +1626,18 @@ mount's first view settles.
 (`status`, `add -A`, `clean`), backup tools and indexers do not walk or copy
 hidden versions. Like ZFS's hidden `.zfs`, it is always there by name
 (`cd <mountpoint>/.peerbit-conflicts`), and
-`peerbit-fs conflicts --fail-if-any` tells whether it has entries. A mount
-scans conflicts on the first read of the tree after a change that may alter it
-(see `onNamespaceChange()`; a target without that feed scans on every read)
-and serves later lookups from that scan; listing `/` or looking up the tree
-itself never scans. An entry leaves the tree once `resolveConflict()` or
+`peerbit-fs conflicts --fail-if-any` tells whether it has entries. Listing the
+tree scans every conflict (`conflicts()`, `namingConflicts()`, then each node
+in conflict; about 1 s per 10k files) the first time after a change that may
+alter it, as `onNamespaceChange()` reports one: a create, delete or rename
+anywhere, a version that may fork or merge a file (a save to a file this
+process has not read counts) or is its first, a removed version, or a reset.
+A target without that feed scans on every read. Listing `/` or looking up the
+tree itself never scans, and looking up one
+entry (`stat`, `open`, `cd`) waits for no scan: a name not of the form above
+fails with `ENOENT` at once, and one the last scan held is checked on its own
+node. Only a mount's first lookup, or a well-formed name the last scan did not
+hold, scans. An entry leaves the tree once `resolveConflict()` or
 `resolveNamingConflict()` (or the CLI) settles its conflict.
 
 A file is in conflict only when its heads hold two or more different contents,

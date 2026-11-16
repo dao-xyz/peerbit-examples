@@ -22,6 +22,7 @@ import {
     CONFLICTS_DIR,
     ROOT_NODE_ID,
     basename,
+    conflictEntryNameHash,
     conflictEntryNames,
     dirname,
     fsNameError,
@@ -158,10 +159,7 @@ export type SharedFsMountBackendTarget = {
         options?: { allowPartial?: boolean }
     ): Promise<SharedFsNamingConflict[]>;
     /** See SharedFileSystem.nodeForMount. */
-    nodeForMount?(
-        nodeId: string,
-        path: string
-    ): Promise<SharedFsMountNode | undefined>;
+    nodeForMount?(nodeId: string): Promise<SharedFsMountNode | undefined>;
     /** See SharedFileSystem.listNodeForMount. */
     listNodeForMount?(
         nodeId: string,
@@ -694,8 +692,11 @@ type ConflictTreeNode = { nodeId: string; path: string } & (
       }
 );
 
+/** A conflict-tree entry: what names it, and the node it shows. */
+type ConflictRecord = ConflictEntryNameParts & { node: ConflictTreeNode };
+
 /** The conflict tree's entries by name (see conflictEntryNames). */
-type ConflictTree = Map<string, ConflictTreeNode>;
+type ConflictTree = Map<string, ConflictRecord>;
 
 /** A listed or hidden node as the conflict tree shows it. */
 const conflictTreeNode = (
@@ -716,16 +717,129 @@ const conflictTreeNode = (
                 live,
             };
 
+/**
+ * The entry of one distinct content of file node `nodeId` at `path`: keyed
+ * by its bytes, so a chmod or touch that replaces `version` keeps its name.
+ */
+const contentRecord = (
+    kind: string,
+    path: string,
+    version: SharedFsVersionInfo,
+    writer: Pick<
+        SharedFsVersionInfo,
+        "authorKey" | "machineLabel" | "createdAt"
+    > = version
+): ConflictRecord => ({
+    kind,
+    path,
+    machineLabel: writer.machineLabel,
+    authorKey: writer.authorKey,
+    time: writer.createdAt,
+    id: `${version.nodeId}\n${version.contentHash ?? version.id}`,
+    node: {
+        kind: "file",
+        nodeId: version.nodeId,
+        path,
+        versionId: version.id,
+        size: version.size,
+        mtimeMs: Number(version.mtime),
+    },
+});
+
+/**
+ * The entries `node` makes as a `kind` conflict, none once it is not one:
+ * for content, each of its two or more contents; for delete-vs-edit, each
+ * content its delete did not observe; otherwise the node itself, a
+ * duplicate-name claimant while shadowed and an unreachable node while
+ * top-most.
+ */
+const conflictRecords = (
+    node: SharedFsMountNode,
+    kind: string
+): ConflictRecord[] => {
+    if (kind === "content" || kind === "delete-vs-edit") {
+        return node.contents
+            .filter(({ unobserved }) =>
+                kind === "content"
+                    ? !node.deleted && node.contents.length > 1
+                    : node.deleted && unobserved
+            )
+            .map(({ version, writer }) =>
+                contentRecord(kind, node.path, version, writer)
+            );
+    }
+    const shown =
+        kind === "multi-head"
+            ? node.multiHead
+            : kind === "duplicate-name"
+              ? node.shadowed
+              : kind === "unreachable" && node.unreachable === "top";
+    const treeNode = shown && conflictTreeNode(node, true);
+    // Undefined for a file with no content yet.
+    return treeNode
+        ? [
+              {
+                  kind,
+                  path: node.path,
+                  machineLabel: node.machineLabel,
+                  authorKey: node.authorKey,
+                  time: node.namedAt,
+                  id: node.nodeId,
+                  directory: treeNode.kind === "directory",
+                  node: treeNode,
+              },
+          ]
+        : [];
+};
+
 /** Name each entry, sorted by name. */
-const entriesByName = (
-    records: (ConflictEntryNameParts & { node: ConflictTreeNode })[]
-): ConflictTree => {
+const entriesByName = (records: ConflictRecord[]): ConflictTree => {
     const names = conflictEntryNames(records);
     return new Map(
         records
-            .map((record, i) => [names[i], record.node] as const)
+            .map((record, i) => [names[i], record] as const)
             .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     );
+};
+
+/**
+ * @internal The unreachable nodes the conflict tree shows as entries, in
+ * one pass over `parents` (each unreachable node's winning parent): those
+ * whose parent is not unreachable itself, and the least id on each move
+ * cycle. The others are found inside them.
+ */
+export const topMostUnreachable = (
+    parents: ReadonlyMap<string, string | undefined>
+) => {
+    const top = new Set<string>();
+    const done = new Set<string>();
+    for (const start of parents.keys()) {
+        // Walk up to a node that is not unreachable, one decided before,
+        // or a repeat (a cycle); each node is walked once.
+        const walked = new Map<string, number>();
+        let current: string | undefined = start;
+        while (
+            current !== undefined &&
+            parents.has(current) &&
+            !done.has(current) &&
+            !walked.has(current)
+        ) {
+            walked.set(current, walked.size);
+            current = parents.get(current);
+        }
+        const chain = [...walked.keys()];
+        if (current === undefined || !parents.has(current)) {
+            if (chain.length > 0) top.add(chain[chain.length - 1]);
+        } else if (walked.has(current)) {
+            top.add(
+                chain
+                    .slice(walked.get(current))
+                    .reduce((least, id) => (id < least ? id : least))
+            );
+        }
+        for (const id of chain) done.add(id);
+    }
+    return top;
 };
 
 const readOnlyError = (path: string) =>
@@ -1113,147 +1227,100 @@ export const createSharedFsMountBackend = (
         typeof target.readNodeVersionForMount === "function";
 
     /**
-     * Scan every conflict into the entries of CONFLICTS_DIR: a file for each
-     * distinct head of a content conflict and each version a delete did not
-     * observe (delete-vs-edit), and the node of each multi-head, each
-     * shadowed duplicate-name claimant and each top-most unreachable node
-     * (one whose winning parent is not itself unreachable, or the least id
-     * on a move cycle), the others being found inside it.
+     * Scan every conflict into the entries of CONFLICTS_DIR: conflicts() and
+     * namingConflicts() name the nodes, of the unreachable ones only the
+     * top-most (see topMostUnreachable), and nodeForMount() gives what each
+     * shows (see conflictRecords), as when a lookup checks one entry.
      */
     const scanConflictTree = async (): Promise<ConflictTree> => {
-        const records: (ConflictEntryNameParts & {
-            node: ConflictTreeNode;
-        })[] = [];
-        const seen = new Set<string>();
-        const add = (
-            kind: string,
-            id: string,
-            writer: { authorKey: string; machineLabel: string },
-            time: bigint,
-            node: ConflictTreeNode
-        ) => {
-            if (seen.has(`${kind}\n${id}`)) return;
-            seen.add(`${kind}\n${id}`);
-            records.push({
-                kind,
-                path: node.path,
-                machineLabel: writer.machineLabel,
-                authorKey: writer.authorKey,
-                time,
-                id,
-                directory: node.kind === "directory",
-                node,
-            });
-        };
-        const versionNode = (
-            path: string,
-            version: SharedFsVersionInfo
-        ): ConflictTreeNode => ({
-            kind: "file",
-            nodeId: version.nodeId,
-            path,
-            versionId: version.id,
-            size: version.size,
-            mtimeMs: Number(version.mtime),
-        });
         // A mount listing tolerates partial results while a cold-start
         // bootstrap overlay is active.
-        for (const conflict of await target.conflicts(undefined, {
+        const content = await target.conflicts(undefined, {
             allowPartial: true,
-        })) {
-            for (const version of conflict.versions) {
-                add(
-                    "content",
-                    version.id,
-                    version,
-                    version.createdAt,
-                    versionNode(conflict.path, version)
-                );
-            }
+        });
+        if (!namingTree) {
+            // Without node lookups: each head as conflicts() lists it.
+            return entriesByName(
+                content.flatMap((conflict) =>
+                    conflict.versions.map((version) =>
+                        contentRecord("content", conflict.path, version)
+                    )
+                )
+            );
         }
-        if (!namingTree) return entriesByName(records);
         const naming = await target.namingConflicts!(undefined, {
             allowPartial: true,
         });
-        const unreachableParents = new Map(
-            naming.flatMap((conflict) =>
-                conflict.type === "unreachable"
-                    ? [[conflict.nodeId, conflict.parentId] as const]
-                    : []
+        const top = topMostUnreachable(
+            new Map(
+                naming.flatMap((conflict) =>
+                    conflict.type === "unreachable"
+                        ? [[conflict.nodeId, conflict.parentId] as const]
+                        : []
+                )
             )
         );
-        const topMost = (nodeId: string) => {
-            const chain = [nodeId];
-            let parent = unreachableParents.get(nodeId);
-            while (parent !== undefined && unreachableParents.has(parent)) {
-                if (parent === nodeId) {
-                    // On a move cycle: its least id stands for it.
-                    return chain.every((id) => id >= nodeId);
-                }
-                if (chain.includes(parent)) return false; // below a cycle
-                chain.push(parent);
-                parent = unreachableParents.get(parent);
-            }
-            return chain.length === 1;
-        };
+        const candidates = new Map<string, readonly [string, string]>();
+        const add = (kind: string, nodeId: string) =>
+            candidates.set(`${kind}\n${nodeId}`, [kind, nodeId]);
+        for (const conflict of content) add("content", conflict.nodeId);
         for (const conflict of naming) {
-            if (conflict.type === "delete-vs-edit") {
-                const node = await target.nodeForMount!(
-                    conflict.nodeId,
-                    conflict.path
-                );
-                for (const versionId of conflict.recoverableVersionIds ?? []) {
-                    const version = node?.versions.find(
-                        (candidate) => candidate.id === versionId
-                    );
-                    if (version) {
-                        add(
-                            conflict.type,
-                            version.id,
-                            version,
-                            version.createdAt,
-                            versionNode(conflict.path, version)
-                        );
-                    }
+            if (conflict.type === "duplicate-name") {
+                for (const nodeId of conflict.shadowedNodeIds ?? []) {
+                    add(conflict.type, nodeId);
                 }
-                continue;
+            } else if (
+                conflict.type !== "unreachable" ||
+                top.has(conflict.nodeId)
+            ) {
+                add(conflict.type, conflict.nodeId);
             }
-            const nodeIds =
-                conflict.type === "duplicate-name"
-                    ? (conflict.shadowedNodeIds ?? [])
-                    : conflict.type === "unreachable" &&
-                        !topMost(conflict.nodeId)
-                      ? []
-                      : [conflict.nodeId];
-            for (const nodeId of nodeIds) {
-                const node = await target.nodeForMount!(nodeId, conflict.path);
-                const shown = node && conflictTreeNode(node, true);
-                // Undefined for a file with no content yet.
-                if (shown) {
-                    add(conflict.type, nodeId, node, node.namedAt, shown);
-                }
+        }
+        const nodes = new Map<string, SharedFsMountNode | undefined>();
+        const records: ConflictRecord[] = [];
+        for (const [kind, nodeId] of candidates.values()) {
+            if (!nodes.has(nodeId)) {
+                nodes.set(nodeId, await target.nodeForMount!(nodeId));
             }
+            const node = nodes.get(nodeId);
+            if (node) records.push(...conflictRecords(node, kind));
         }
         return entriesByName(records);
     };
 
     /**
-     * The conflict tree, scanned again only once a feed batch may have
-     * changed it (conflictsSeq) or without a feed; concurrent readers share
-     * one scan.
+     * The last finished scan, kept after a change for conflictEntry, and
+     * the scan in flight, which concurrent readers share.
      */
-    let conflictTreeScan:
-        | { seq: number; tree: Promise<ConflictTree> }
-        | undefined;
-    const conflictTree = () => {
-        if (feed && conflictTreeScan?.seq === conflictsSeq) {
-            return conflictTreeScan.tree;
+    let lastScan: { seq: number; tree: ConflictTree } | undefined;
+    let pendingScan: { seq: number; tree: Promise<ConflictTree> } | undefined;
+
+    /**
+     * The tree as it is now: the last scan until a feed batch may have
+     * changed it (conflictsSeq), else a new scan. Without a feed every
+     * read scans.
+     */
+    const conflictTree = (): Promise<ConflictTree> => {
+        if (feed && lastScan?.seq === conflictsSeq) {
+            return Promise.resolve(lastScan.tree);
+        }
+        if (feed && pendingScan?.seq === conflictsSeq) {
+            return pendingScan.tree;
         }
         const scan = { seq: conflictsSeq, tree: scanConflictTree() };
-        conflictTreeScan = scan;
-        scan.tree.catch(() => {
-            if (conflictTreeScan === scan) conflictTreeScan = undefined;
-        });
+        pendingScan = scan;
+        void scan.tree
+            .then(
+                (tree) => {
+                    if (feed && (lastScan?.seq ?? -1) < scan.seq) {
+                        lastScan = { seq: scan.seq, tree };
+                    }
+                },
+                () => {}
+            )
+            .finally(() => {
+                if (pendingScan === scan) pendingScan = undefined;
+            });
         return scan.tree;
     };
 
@@ -2215,13 +2282,41 @@ export const createSharedFsMountBackend = (
     /** A node entry's file as it is now (see ConflictTreeNode). */
     const liveNode = async (node: ConflictTreeNode) => {
         if (node.kind !== "file" || !node.live) return node;
-        const now = await target.nodeForMount!(node.nodeId, node.path);
+        const now = await target.nodeForMount!(node.nodeId);
         return (now && conflictTreeNode(now, true)) ?? node;
     };
 
     /**
+     * What the entry `name` shows now, scanning only when it must: a name
+     * no entry can have (".DS_Store", "._x", "desktop.ini") is missing, and
+     * an entry the last scan found is checked on its own node when a
+     * change came since (see conflictRecords). Any other name, or the first
+     * lookup, waits for a scan.
+     */
+    const conflictEntry = async (
+        name: string
+    ): Promise<ConflictTreeNode | undefined> => {
+        const hash = conflictEntryNameHash(name);
+        if (hash === undefined) return undefined;
+        const last = lastScan;
+        const known = last?.tree.get(name);
+        if (known && namingTree && last!.seq !== conflictsSeq) {
+            const node = await target.nodeForMount!(known.node.nodeId);
+            return (
+                node &&
+                conflictRecords(node, known.kind).find(
+                    (record) =>
+                        conflictEntryNames([record], hash.length)[0] === name
+                )?.node
+            );
+        }
+        const record = (await conflictTree()).get(name);
+        return record && liveNode(record.node);
+    };
+
+    /**
      * What a path under CONFLICTS_DIR names, looked up one name at a time
-     * (see listConflictDirectory).
+     * (see conflictEntry and listConflictDirectory).
      */
     const resolveConflictPath = async (
         path: string
@@ -2232,8 +2327,7 @@ export const createSharedFsMountBackend = (
     > => {
         const [, entryName, ...names] = pathSegments(path);
         if (entryName === undefined) return { kind: "root" };
-        const entry = (await conflictTree()).get(entryName);
-        let node = entry && (await liveNode(entry));
+        let node = await conflictEntry(entryName);
         const visited = new Set<string>();
         for (const name of names) {
             if (!node) break;
@@ -2302,7 +2396,7 @@ export const createSharedFsMountBackend = (
                         resolved.kind === "root"
                             ? await Promise.all(
                                   [...(await conflictTree())].map(
-                                      async ([name, node]) => ({
+                                      async ([name, { node }]) => ({
                                           name,
                                           node: includeStats
                                               ? await liveNode(node)

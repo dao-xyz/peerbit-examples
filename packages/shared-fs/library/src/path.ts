@@ -188,3 +188,13 @@ export const conflictEntryNames = (
         folded.get(name.toLowerCase())! > 1 ? nameOf(entries[i], 64) : name
     );
 };
+
+/**
+ * The hash in `name` when conflictEntryNames could have made it (a kind,
+ * a space, ..., a space, 12 or 64 hex digits, an extension), else
+ * undefined: a mount answers other names without looking.
+ */
+export const conflictEntryNameHash = (name: string) =>
+    /^(?:content|delete-vs-edit|duplicate-name|multi-head|unreachable) .+ ([0-9a-f]{12}|[0-9a-f]{64})(?:\.[\w-]{1,16})?$/.exec(
+        name
+    )?.[1];

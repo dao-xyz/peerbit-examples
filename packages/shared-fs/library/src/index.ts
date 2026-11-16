@@ -1387,14 +1387,44 @@ export type SharedFsNamingConflict = {
 };
 
 /**
- * A node wherever, or whether, it is named (see
- * SharedFileSystem.nodeForMount): its entry as stat() gives one, the time
- * of its winning naming head, and for a file every content head, the one
- * it shows first.
+ * A node wherever, or whether, it is named, as a mount's conflict tree
+ * shows it (see SharedFileSystem.nodeForMount): its entry as stat() gives
+ * one at its best-effort `path`, and what makes it a conflict.
  */
 export type SharedFsMountNode = SharedFsEntryInfo & {
+    /** When its winning naming event was made. */
     namedAt: bigint;
-    versions: SharedFsVersionInfo[];
+    /** Its winning naming event deletes it. */
+    deleted: boolean;
+    /** Its naming has concurrent heads. */
+    multiHead: boolean;
+    /** Live, but another claimant of its name wins (duplicate-name). */
+    shadowed: boolean;
+    /**
+     * Live, but its parents do not reach "/": "top" when its own parent is
+     * missing or deleted, or when it is on a move cycle and has the
+     * cycle's least id; "below" otherwise.
+     */
+    unreachable?: "top" | "below";
+    /** For a file: its heads grouped by bytes, in visible order. */
+    contents: SharedFsMountContent[];
+};
+
+/** One of a file's distinct contents (see SharedFsMountNode). */
+export type SharedFsMountContent = {
+    /** The first head holding these bytes. */
+    version: SharedFsVersionInfo;
+    /**
+     * Who wrote these bytes and when: of the versions reached from the
+     * heads holding them through parents holding them too (a chmod, a
+     * touch or a recorded copy keeps them), the oldest.
+     */
+    writer: Pick<
+        SharedFsVersionInfo,
+        "authorKey" | "machineLabel" | "createdAt"
+    >;
+    /** For a deleted file: its delete observed not every head holding them. */
+    unobserved: boolean;
 };
 
 export type ResolveNamingAction =
@@ -2099,6 +2129,35 @@ const contentConflictHeads = <T extends VersionLike>(heads: T[]): T[] => {
     return heads.filter(
         (head) => !seen.has(head.contentHash) && !!seen.add(head.contentHash)
     );
+};
+
+/** The older of two versions by creation time, then id. */
+const olderVersion = (a: VersionLike, b: VersionLike) =>
+    (compareBigint(a.createdAt, b.createdAt) || compareIds(a.id, b.id)) <= 0
+        ? a
+        : b;
+
+/**
+ * The version that wrote `head`'s bytes: the oldest reached from it
+ * through parents (in `rows`) holding the same bytes, else `head`.
+ */
+const bytesOrigin = (head: VersionLike, rows: Map<string, VersionLike>) => {
+    let origin = head;
+    const visited = new Set<string>();
+    while (head.contentHash !== undefined && !visited.has(origin.id)) {
+        visited.add(origin.id);
+        const same = origin.parentVersionIds.flatMap((id) => {
+            const parent = rows.get(id);
+            return parent && parent.contentHash === head.contentHash
+                ? [parent]
+                : [];
+        });
+        if (same.length === 0) {
+            break;
+        }
+        origin = same.reduce(olderVersion);
+    }
+    return origin;
 };
 
 const FILE_MODES: readonly number[] = Object.values(SHARED_FS_MODE);
@@ -9324,36 +9383,95 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * Node `nodeId` wherever or whether it is named (see SharedFsMountNode),
-     * with `path` as its path; undefined for an unknown node or a file with
-     * no content yet. A mount's conflict tree shows hidden nodes through it.
+     * Node `nodeId` wherever or whether it is named (see SharedFsMountNode);
+     * undefined for an unknown node or a file with no content yet. A
+     * mount's conflict tree shows hidden nodes, and checks one entry, by it.
      */
-    async nodeForMount(
-        nodeId: string,
-        path: string
-    ): Promise<SharedFsMountNode | undefined> {
+    async nodeForMount(nodeId: string): Promise<SharedFsMountNode | undefined> {
         const state = await this.namingStateForNode(nodeId);
         if (!state) {
             return undefined;
         }
+        const { winner } = state;
+        const names = [winner.name];
+        // The best-effort path (as pathForNode walks it) and, on the same
+        // walk, the first break between the node and "/".
+        let unreachable: "top" | "below" | undefined;
+        const visited = new Set([nodeId]);
+        let least = nodeId;
+        let parentId = winner.parentId;
+        while (parentId !== ROOT_NODE_ID) {
+            const own = visited.size === 1;
+            if (visited.has(parentId)) {
+                // A move cycle: its least id stands for it.
+                unreachable ??=
+                    parentId === nodeId && least === nodeId ? "top" : "below";
+                break;
+            }
+            const parent = await this.namingStateForNode(parentId);
+            if (!parent || parent.winner.deleted) {
+                unreachable ??= own ? "top" : "below";
+            }
+            if (!parent) {
+                break;
+            }
+            names.unshift(parent.winner.name);
+            visited.add(parentId);
+            least = parentId < least ? parentId : least;
+            parentId = parent.winner.parentId;
+        }
+        const path = "/" + names.join("/");
         const heads =
             nodeKindOf(nodeId) === "file"
                 ? await this.headsForNode(nodeId)
                 : undefined;
-        const info = this.entryInfoFor(state.winner, path, {
+        const info = this.entryInfoFor(winner, path, {
             heads,
             meta: heads && (await this.headMeta(heads)),
             namingConflict: state.conflicted,
         });
-        return (
-            info && {
-                ...info,
-                namedAt: state.winner.createdAt,
-                versions: (heads ?? []).map((head) =>
-                    this.versionInfo(head, path, heads!)
-                ),
-            }
-        );
+        if (!info) {
+            return undefined;
+        }
+        const rows = heads && (await this.versionRowsFor(nodeId));
+        const observed =
+            heads && winner.deleted
+                ? new Set(
+                      (await this.getDocument<NamingEvent>(winner.id))
+                          ?.observedContentHeads
+                  )
+                : undefined;
+        return {
+            ...info,
+            namedAt: winner.createdAt,
+            deleted: winner.deleted,
+            multiHead: state.conflicted,
+            shadowed:
+                !winner.deleted &&
+                !!(
+                    await this.slotResolution(winner.parentId, winner.name)
+                )?.shadowed.includes(nodeId),
+            unreachable: winner.deleted ? undefined : unreachable,
+            contents: contentConflictHeads(heads ?? []).map((version) => {
+                const same = heads!.filter(
+                    (head) => head.contentHash === version.contentHash
+                );
+                const writer = same
+                    .map((head) => bytesOrigin(head, rows!))
+                    .reduce(olderVersion);
+                return {
+                    version: this.versionInfo(version, path, heads!),
+                    writer: {
+                        authorKey: writer.authorKey ?? "",
+                        machineLabel: writer.machineLabel ?? "",
+                        createdAt: writer.createdAt,
+                    },
+                    unobserved:
+                        !!observed &&
+                        same.some((head) => !observed.has(head.id)),
+                };
+            }),
+        };
     }
 
     /**
@@ -19367,8 +19485,8 @@ export class SharedFsHandle {
     }
 
     /** See SharedFileSystem.nodeForMount. */
-    nodeForMount(nodeId: string, path: string) {
-        return this.program.nodeForMount(nodeId, path);
+    nodeForMount(nodeId: string) {
+        return this.program.nodeForMount(nodeId);
     }
 
     /** See SharedFileSystem.listNodeForMount. */

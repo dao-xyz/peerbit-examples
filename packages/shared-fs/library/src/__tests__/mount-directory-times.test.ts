@@ -36,7 +36,7 @@ const mountTarget = (
     versions: (path) => fs.versions(path),
     conflicts: (path, options) => fs.conflicts(path, options),
     namingConflicts: (path, options) => fs.namingConflicts(path, options),
-    nodeForMount: (nodeId, path) => fs.nodeForMount(nodeId, path),
+    nodeForMount: (nodeId) => fs.nodeForMount(nodeId),
     listNodeForMount: (nodeId, path) => fs.listNodeForMount(nodeId, path),
     childForMount: (parentNodeId, name, path) =>
         fs.childForMount(parentNodeId, name, path),
@@ -48,7 +48,10 @@ const mountTarget = (
     ...overrides,
 });
 
-/** The conflict-tree name of content version `id` of the file at `path`. */
+/**
+ * The conflict-tree name of the content of version `id` of the file at
+ * `path`, which that version wrote: it is keyed by the file and its bytes.
+ */
 const contentEntryName = async (
     fs: SharedFsHandle,
     path: string,
@@ -64,7 +67,7 @@ const contentEntryName = async (
             machineLabel: version.machineLabel,
             authorKey: version.authorKey,
             time: version.createdAt,
-            id,
+            id: `${version.nodeId}\n${version.contentHash}`,
         },
     ])[0];
 };
