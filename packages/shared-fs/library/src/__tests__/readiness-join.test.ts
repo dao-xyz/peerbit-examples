@@ -344,6 +344,22 @@ const shadowCounts = () => ({
     ...globalThis.__SFS_READINESS_SHADOW__!.counts,
 });
 
+/**
+ * The deadline of these tests' dials. J and R share one event loop, and on
+ * a loaded machine the donor's shared-log rebalance scan after its writes
+ * (upstream U-44) stalls it for seconds while J dials R: libp2p's
+ * per-address (6 s) and per-dial (10 s) timers then fire before the
+ * handshake ends ("TimeoutError: The operation was aborted due to
+ * timeout", timer frames only). Every peer here gives an address and an
+ * inbound upgrade this long, and `dial` passes it to peerbit, which bounds
+ * the dial and its neighbour waits by it. It only gives up; nothing
+ * retries.
+ */
+const DIAL_DEADLINE_MS = 60_000;
+
+const dial = (peer: Peerbit, to: Peerbit) =>
+    peer.dial(to, { dialTimeoutMs: DIAL_DEADLINE_MS });
+
 describe("readiness join (in-process)", () => {
     const peers: Peerbit[] = [];
     const roots: string[] = [];
@@ -372,9 +388,15 @@ describe("readiness join (in-process)", () => {
     ) => {
         const peer = await Peerbit.create({
             ...(options.directory ? { directory: options.directory } : {}),
-            ...(options.connectionGater
-                ? { libp2p: { connectionGater: options.connectionGater } }
-                : {}),
+            libp2p: {
+                connectionManager: {
+                    addressDialTimeout: DIAL_DEADLINE_MS,
+                    inboundUpgradeTimeout: DIAL_DEADLINE_MS,
+                },
+                ...(options.connectionGater
+                    ? { connectionGater: options.connectionGater }
+                    : {}),
+            },
         } as any);
         peers.push(peer);
         return peer;
@@ -447,7 +469,7 @@ describe("readiness join (in-process)", () => {
         } = {}
     ): Promise<Node> => {
         const peer = options.peer ?? (await createPeer());
-        for (const donor of donors) await peer.dial(donor.peer);
+        for (const donor of donors) await dial(peer, donor.peer);
         const fs = await openSharedFs({
             peerbit: peer,
             address: donors[0].fs.address,
@@ -661,7 +683,7 @@ describe("readiness join (in-process)", () => {
         restores.push(() => (writing = false));
         await waitUntil(() => expect(written).toBeGreaterThanOrEqual(5));
         const peer = await createPeer();
-        await peer.dial(donor.peer);
+        await dial(peer, donor.peer);
         const writtenAtOpen = written;
         const opened = performance.now();
         const flip = atReadyOn(peer, (fs) => {
