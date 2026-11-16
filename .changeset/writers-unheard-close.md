@@ -11,4 +11,5 @@ for each peer that does not answer: once the peers it had asked stopped,
 closing the replica took about two minutes. The report now reads the trusted
 keys from this replica's own trust graph and stops when the filesystem closes,
 so `close()` no longer waits on other peers for it. The event's fields are
-unchanged. `trustedWriters()` still asks the trust graph's peers.
+unchanged. `trustedWriters()` still asks the trust graph's peers, so it can
+wait on peers that do not answer.
