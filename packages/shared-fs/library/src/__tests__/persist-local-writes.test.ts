@@ -170,6 +170,26 @@ describe("persistLocalWrites", () => {
         expect(source.pendingLocalWrites().entries).toBe(0);
     });
 
+    it("starts over when an entry it holds is put again under it", async () => {
+        const { source } = await pair();
+        await source.writeFile("/a.txt", "same bytes");
+        const pending = source.pendingLocalWrites().entries;
+        withholdReplicationEvents(source);
+        // The same bytes again, not deduplicated: their chunk is put again
+        // under its id, and that new head replaces the one being delivered.
+        onFirstDelivery(source, () =>
+            source.writeFile("/copy.txt", "same bytes", { dedup: "off" })
+        );
+        const started = performance.now();
+        // Its version and its name are new; the chunk is the same entry id.
+        expect(
+            await source.persistLocalWrites({ timeout: WAIT_TIMEOUT_MS })
+        ).toBe(pending + 2);
+        // Not at the deadline: the replaced head is never acknowledged.
+        expect(performance.now() - started).toBeLessThan(WAIT_TIMEOUT_MS / 2);
+        expect(source.pendingLocalWrites().entries).toBe(0);
+    });
+
     it("is not failed by a snapshot published while it runs", async () => {
         const { source } = await pair();
         await source.writeFile("/a.txt", "a");

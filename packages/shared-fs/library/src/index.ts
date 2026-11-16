@@ -3367,8 +3367,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     private localWrites?: Map<string, { nodeId?: string }>;
     private remoteReplicaSeen?: boolean;
     private replicationEvent?: Promise<void>;
-    private localWriteRemoval?: AbortController;
-    private localWriteRemoved?: () => void;
+    private localWritesRestart?: AbortController;
+    private restartLocalWrites?: () => void;
     /** Row queries issued; tests assert warm paths issue none. */
     rowQueries = 0;
     // --- Cold-start bootstrap state (all re-initialized in open()) ---
@@ -4329,10 +4329,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             wake();
             this.replicationEvent = new Promise((resolve) => (wake = resolve));
         };
-        // A removal from localWrites aborts a delivery that may name it.
-        (this.localWriteRemoved = () => {
-            this.localWriteRemoval?.abort();
-            this.localWriteRemoval = new AbortController();
+        // A removed or replaced id aborts a delivery that may name it.
+        (this.restartLocalWrites = () => {
+            this.localWritesRestart?.abort();
+            this.localWritesRestart = new AbortController();
             onReplication();
         })();
         const lifecycle = this.maintenanceAbortController!.signal;
@@ -4440,12 +4440,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             this.lastArrivalMs = this.clock();
             const localKey = this.authorKey();
-            // Gone here (a CUT, GC, a replicated delete): nothing left for
-            // persistLocalWrites to deliver.
+            // persistLocalWrites starts over when a recorded id is gone here
+            // (a CUT, GC, a replicated delete: nothing left to deliver) or
+            // put again (a chunk re-linked or written again): its old entry
+            // is no head now, so no replica confirms it, and no removal is
+            // listed for it.
+            let restart = false;
             for (const value of removed)
-                if (this.localWrites?.delete(value?.id))
-                    this.localWriteRemoved?.();
+                restart = !!this.localWrites?.delete(value?.id) || restart;
             for (const value of added) {
+                restart ||= !!this.localWrites?.has(value?.id);
                 // persistLocalWrites: this key's entries and the chunks its
                 // versions name (shared by content, maybe appended elsewhere).
                 // Not the snapshot manifest: maintenance, no user write.
@@ -4467,6 +4471,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     }
                 }
             }
+            if (restart) this.restartLocalWrites?.();
             this.applyCacheChanges(added, removed);
             this.watchHub?.ingest(added, removed);
             this.changesetHub?.ingest(added, removed);
@@ -16028,10 +16033,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     level.push(winner.parentId);
                 }
             }
-            // A removal from here on (a CUT, GC, a replicated delete) aborts
-            // a delivery that may name it, and the next pass resolves again.
+            // A removal or a re-put from here on aborts a delivery that may
+            // name it, and the next pass resolves again.
             const joined = this.replicationEvent!;
-            const removal = this.localWriteRemoval!.signal;
+            const restart = this.localWritesRestart!.signal;
             const writes = new Map(ledger);
             const ids = [...writes.keys()];
             const refs: Array<
@@ -16084,7 +16089,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         {
                             ...fence,
                             signal: AbortSignal.any(
-                                [removal, fence.signal!].filter(Boolean)
+                                [restart, fence.signal!].filter(Boolean)
                             ),
                         },
                         deadline,
@@ -16093,10 +16098,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         context
                     );
                 } catch (error) {
-                    // No remote leader, or an entry gone under it: start over
-                    // on the next replication event or removal, until the
-                    // deadline.
-                    if (!removal.aborted || fence.signal?.aborted) {
+                    // No remote leader, or an entry gone or put again under
+                    // it: start over on the next replication event or
+                    // restart, until the deadline.
+                    if (!restart.aborted || fence.signal?.aborted) {
                         if (!deadline) throw error;
                         await step(joined);
                     }
