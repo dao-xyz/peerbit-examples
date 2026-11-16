@@ -41,5 +41,6 @@ jobs:
             - name: Check release script syntax
               run: node --check scripts/release-packages.mjs
 
+            # The second file runs the release script with stub npm and pnpm.
             - name: Test npm publish authentication
-              run: node --test scripts/release-packages-auth.test.mjs
+              run: node --test scripts/release-packages-auth.test.mjs scripts/release-packages.test.mjs
