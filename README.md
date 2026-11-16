@@ -107,8 +107,10 @@ no npm secret: npm 11.5.1 or later (the workflow runs Node 24) exchanges the
 job's OIDC id-token for a short-lived publish token, and each version still gets
 provenance. Every package it publishes needs a trusted publisher in its settings
 on npmjs.com: GitHub Actions, organization `dao-xyz`, repository
-`peerbit-examples`, workflow filename `release.yml`, no environment. npm expires
-a new trusted publisher that has not published within 2 days, so add it shortly
+`peerbit-examples`, workflow filename `release.yml`, no environment, and under
+"Allowed actions" "Allow npm publish" ticked: without it a new trusted
+publisher allows only `npm stage publish`, and the release fails. npm expires a
+new trusted publisher that has not published within 2 days, so add it shortly
 before the package's next release. A package that is not on npm yet has no
 settings page, so its first version needs the token or a manual publish.
 
