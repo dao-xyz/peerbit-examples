@@ -33,9 +33,16 @@ type peerbitFS struct {
 // host needs for d_type.
 const requestReaddirStats = runtime.GOOS == "windows"
 
+// runNativeMount checks the FUSE runtime with these. A test replaces them to
+// run it as on a Mac with only FUSE-T.
+var (
+	mountGOOS         = runtime.GOOS
+	fuseLibraryExists = pathExists
+)
+
 func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mountProfiler) error {
 	// Refuse an unsupported FUSE runtime before connecting or mounting.
-	if err := nativeRuntimeError(runtime.GOOS, pathExists); err != nil {
+	if err := nativeRuntimeError(mountGOOS, fuseLibraryExists); err != nil {
 		return err
 	}
 	fs := &peerbitFS{
