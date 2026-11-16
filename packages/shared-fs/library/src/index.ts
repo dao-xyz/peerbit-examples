@@ -56,6 +56,9 @@ import {
     FileChunk,
     FileVersion,
     IndexableSharedFsEntry,
+    MAX_CAUSAL_DEPTH,
+    MAX_FILE_CHUNK_SIZE,
+    MAX_FILE_VERSION_CHUNKS,
     NamingEvent,
     SegmentRef,
     SHARED_FS_MODE,
@@ -70,6 +73,8 @@ import {
     ROOT_NODE_ID,
     basename,
     dirname,
+    fsNameError,
+    fsNameErrorMessage,
     joinFsPath,
     normalizeFsPath,
     pathSegments,
@@ -222,6 +227,8 @@ export { Peerbit } from "peerbit";
 
 export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
+/** Distinct chunks per version; see writeFile. */
+const MAX_FILE_VERSION_UNIQUE_CHUNKS = 8000;
 
 export type SharedFsMountWriteOutcome = "unchanged" | "created";
 export type SharedFsMountOpenDescendant = { path: string; nodeId: string };
@@ -1550,6 +1557,10 @@ export type SharedFsErrorCode =
     | "ENOTEMPTY"
     | "EINVAL"
     | "EIO"
+    /** A name is over MAX_NAME_BYTES bytes of UTF-8. */
+    | "ENAMETOOLONG"
+    /** A file needs more than MAX_FILE_VERSION_CHUNKS chunks. */
+    | "EFBIG"
     /** The path is artifact-ignored by the effective policy. */
     | "EIGNORED"
     /** The operation crosses an artifact-ignore boundary. */
@@ -1938,10 +1949,21 @@ const toBytes = async (
 };
 
 const chunkBytes = (bytes: Uint8Array, chunkSize = DEFAULT_FILE_CHUNK_SIZE) => {
-    if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+    if (
+        !Number.isInteger(chunkSize) ||
+        chunkSize <= 0 ||
+        chunkSize > MAX_FILE_CHUNK_SIZE
+    ) {
         throw new SharedFsError(
             "EINVAL",
-            `Invalid chunk size: ${String(chunkSize)}`
+            `Invalid chunk size: ${String(chunkSize)} (an integer from 1 to ${MAX_FILE_CHUNK_SIZE} bytes)`
+        );
+    }
+    const count = Math.ceil(bytes.byteLength / chunkSize);
+    if (count > MAX_FILE_VERSION_CHUNKS) {
+        throw new SharedFsError(
+            "EFBIG",
+            `File of ${bytes.byteLength} bytes needs ${count} chunks of ${chunkSize} bytes; a version holds at most ${MAX_FILE_VERSION_CHUNKS} (raise chunkSize, up to ${MAX_FILE_CHUNK_SIZE})`
         );
     }
     const chunks: Uint8Array[] = [];
@@ -2249,6 +2271,7 @@ const mergeHeadMeta = (
     };
 };
 
+/** One past the deepest parent, saturating at MAX_CAUSAL_DEPTH. */
 const maxDepth = (parents: { causalDepth: bigint }[]): bigint => {
     let max = 0n;
     for (const parent of parents) {
@@ -2256,7 +2279,7 @@ const maxDepth = (parents: { causalDepth: bigint }[]): bigint => {
             max = parent.causalDepth;
         }
     }
-    return 1n + max;
+    return max < MAX_CAUSAL_DEPTH ? 1n + max : MAX_CAUSAL_DEPTH;
 };
 
 /**
@@ -2606,9 +2629,6 @@ const mapWithConcurrency = async <T, R>(
     }
     return results;
 };
-
-const VALID_NAME = (name: string) =>
-    name.length > 0 && !name.includes("/") && name !== "." && name !== "..";
 
 const decodesToStringArray = (value: string) => {
     try {
@@ -2963,6 +2983,40 @@ const equalBytes = (a: Uint8Array, b: Uint8Array) =>
     a.byteLength === b.byteLength && a.every((value, i) => value === b[i]);
 
 /**
+ * A chunk list some writer could have made: at most
+ * MAX_FILE_VERSION_CHUNKS ids, at most MAX_FILE_VERSION_UNIQUE_CHUNKS of
+ * them distinct, and exactly ceil(size / chunkSize) of them for a
+ * chunkSize from 1 to MAX_FILE_CHUNK_SIZE (an empty file has one empty
+ * chunk). Repeats are fine: a sparse file repeats its zero chunk.
+ */
+const validChunkList = (value: FileVersion) => {
+    let ids: unknown;
+    try {
+        ids = JSON.parse(value.chunkIdsJson);
+    } catch {
+        return false;
+    }
+    if (
+        !Array.isArray(ids) ||
+        ids.length > MAX_FILE_VERSION_CHUNKS ||
+        !ids.every((id) => typeof id === "string") ||
+        new Set(ids).size > MAX_FILE_VERSION_UNIQUE_CHUNKS
+    ) {
+        return false;
+    }
+    const count = BigInt(ids.length);
+    if (value.size === 0n || count === 0n) {
+        return count <= 1n && value.size === 0n;
+    }
+    // The smallest chunk size giving `count` chunks gives it iff any does.
+    const chunkSize = (value.size + count - 1n) / count;
+    return (
+        chunkSize <= BigInt(MAX_FILE_CHUNK_SIZE) &&
+        (value.size + chunkSize - 1n) / chunkSize === count
+    );
+};
+
+/**
  * Structural, state-independent document validation shared by ingest
  * (canPerform) and bootstrap segment installation: acceptance must never
  * depend on replication order or local history.
@@ -2971,6 +3025,9 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
     if (value instanceof FileChunk) {
         // Content-addressed chunks are self-certifying: the bytes must
         // hash to the id, regardless of who signed the entry.
+        if (value.bytes.byteLength > MAX_FILE_CHUNK_SIZE) {
+            return false;
+        }
         const hash = sha256Base64Sync(value.bytes);
         return hash === value.hash && value.id === `chunk:${hash}`;
     }
@@ -2981,13 +3038,14 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
                 value.nodeId.startsWith("file:")) &&
             (value.parentId === ROOT_NODE_ID ||
                 value.parentId.startsWith("dir:")) &&
-            VALID_NAME(value.name) &&
+            fsNameError(value.name) === undefined &&
             // Reserved control-surface names never enter the shared tree
             // (the mount virtualizes them; a store entry would shadow).
             !value.name.startsWith(RESERVED_NAME_PREFIX) &&
             decodesToStringArray(value.parentNamingIdsJson) &&
             decodesToStringArray(value.observedContentHeadsJson) &&
             value.causalDepth >= 1n &&
+            value.causalDepth <= MAX_CAUSAL_DEPTH &&
             validChangesetId(value.changesetId)
         );
     }
@@ -2996,6 +3054,8 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
             value.id.startsWith("version:") &&
             value.nodeId.startsWith("file:") &&
             value.causalDepth >= 1n &&
+            value.causalDepth <= MAX_CAUSAL_DEPTH &&
+            validChunkList(value) &&
             FILE_MODES.includes(value.mode) &&
             value.mtime <= BigInt(Number.MAX_SAFE_INTEGER) &&
             // The target bytes live in a chunk; only their size is checked.
@@ -4907,6 +4967,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
      * anyway — this just makes the error local and typed).
      */
     private assertWritableName(name: string, kind: "file" | "directory") {
+        const invalid = fsNameError(name);
+        if (invalid) {
+            throw new SharedFsError(invalid, fsNameErrorMessage(invalid, name));
+        }
         if (name.startsWith(RESERVED_NAME_PREFIX)) {
             throw new SharedFsError("EINVAL", `Name is reserved: ${name}`);
         }
@@ -8024,7 +8088,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     orderedChunks.map((chunk) => [chunk.id, chunk])
                 ).values(),
             ];
-            if (uniqueChunks.length > 8000) {
+            if (uniqueChunks.length > MAX_FILE_VERSION_UNIQUE_CHUNKS) {
                 // The indexer's batched child-table insert has a bound-variable
                 // ceiling (~8191 rows). Larger files need a larger chunk size.
                 throw new SharedFsError(
@@ -8494,7 +8558,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 const uniqueChunkIds = new Set(
                     orderedChunks.map((chunk) => chunk.id)
                 );
-                if (uniqueChunkIds.size > 8000) {
+                if (uniqueChunkIds.size > MAX_FILE_VERSION_UNIQUE_CHUNKS) {
                     // The indexer bound is per version row's chunkRefs (see
                     // writeFile); the batch as a whole probes and puts
                     // chunks one document at a time, so its total is
@@ -8531,7 +8595,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                           )
                       )
                     : currentHeads.map((head) => head.id),
-                causalDepth: maxDepth(currentHeads) - (copyId ? 1n : 0n),
+                causalDepth: copyId
+                    ? currentHeads[0].causalDepth
+                    : maxDepth(currentHeads),
                 contentHash,
                 size: BigInt(bytes.byteLength),
                 ...inheritMeta(
@@ -8896,6 +8962,16 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             uniqueIds.map((id, index) => [id, fetched[index]])
         );
         const chunks = chunkIds.map((id) => byId.get(id)!);
+        // Allocate no more than the row claims: a short chunk list can
+        // repeat a large chunk.
+        let total = 0;
+        for (const chunk of chunks) total += chunk.byteLength;
+        if (BigInt(total) !== version.size) {
+            throw new SharedFsError(
+                "EIO",
+                `File size mismatch for ${normalizedPath}`
+            );
+        }
         const bytes = chunks.length === 0 ? new Uint8Array(0) : concat(chunks);
         if (sha256Base64Sync(bytes) !== version.contentHash) {
             throw new SharedFsError(
@@ -11088,6 +11164,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             case "move": {
                 const toPath = normalizeFsPath(action.to);
+                this.assertWritableName(basename(toPath), nodeKindOf(nodeId));
                 const parentId = await this.resolveParent(toPath);
                 if (
                     nodeKindOf(nodeId) === "directory" &&

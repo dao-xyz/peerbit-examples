@@ -1,4 +1,5 @@
 import {
+    DEFAULT_FILE_CHUNK_SIZE,
     SharedFsCreateParentMismatchError,
     SharedFsError,
     SharedFsExpectedNamespaceMismatchError,
@@ -14,6 +15,7 @@ import {
     type WriteFileOptions,
 } from "./index.js";
 import { CONFLICTS_STAMP_KEY, DirectoryStamps } from "./directory-stamps.js";
+import { MAX_FILE_VERSION_CHUNKS } from "./model.js";
 import {
     CONFLICTS_DIR,
     ROOT_NODE_ID,
@@ -21,6 +23,8 @@ import {
     decodeConflictPathName,
     dirname,
     encodeConflictPathName,
+    fsNameError,
+    fsNameErrorMessage,
     joinFsPath,
     normalizeFsPath,
     pathSegments,
@@ -298,7 +302,9 @@ export type SharedFsBackendErrorCode =
     | "EINVAL"
     | "EACCES"
     | "EBADF"
-    | "EROFS";
+    | "EROFS"
+    | "ENAMETOOLONG"
+    | "EFBIG";
 
 export class SharedFsBackendError extends Error {
     constructor(
@@ -758,6 +764,14 @@ const mapWithBoundedConcurrency = async <T, R>(
 };
 
 const ensureMutableCapacity = (state: OpenFileState, capacity: number) => {
+    // Commits use the default chunk size: past this, writeFile would refuse.
+    const max = MAX_FILE_VERSION_CHUNKS * DEFAULT_FILE_CHUNK_SIZE;
+    if (capacity > max && capacity > state.length) {
+        throw new SharedFsBackendError(
+            "EFBIG",
+            `File of ${capacity} bytes exceeds the mount's ${max}: ${state.path}`
+        );
+    }
     const borrowedSnapshot = state.borrowedCommitSnapshot;
     const borrowed = borrowedSnapshot?.buffer === state.buffer;
     if (!borrowed && state.buffer.byteLength >= capacity) {
@@ -2657,6 +2671,14 @@ export const createSharedFsMountBackend = (
                 if (!entry) {
                     if (!parsedFlags.create) {
                         throw notFound(normalized);
+                    }
+                    // Refused here, not at the later commit.
+                    const invalid = fsNameError(basename(normalized));
+                    if (invalid) {
+                        throw new SharedFsBackendError(
+                            invalid,
+                            fsNameErrorMessage(invalid, basename(normalized))
+                        );
                     }
                     createIntent = reserveCreateIntent(
                         normalized,

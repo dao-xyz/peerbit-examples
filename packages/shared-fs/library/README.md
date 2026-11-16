@@ -91,14 +91,36 @@ important for any deployment with more than one writer:
   underlying block store compacts or physically releases those bytes. Snapshot
   segment reclamation is a separate raw-block operation and runs only under the
   explicit `store-exclusive` lifetime assertion described below.
-- **Filename portability is currently the caller's policy.** Library paths are
+- **Filename portability is mostly the caller's policy.** Library paths are
   compared as case-sensitive JavaScript strings after backslashes become path
   separators, empty and `.` components are removed, and `..` is resolved. Shared
   FS does not define cross-platform case folding, Unicode normalization, or
   Windows reserved-name mapping/rejection. A name accepted by the library can
   therefore alias, display differently, or fail through another platform's
   native mount; mixed-platform applications must enforce their own common naming
-  subset.
+  subset. Shared FS itself enforces only the limits below.
+- **Every replica refuses rows outside fixed limits** (`MAX_*` exports), at
+  ingest and at snapshot install, so one buggy or hostile writer cannot
+  publish them; local writes fail before writing anything:
+    - A name is 1-255 bytes of UTF-8 (`MAX_NAME_BYTES`), not `.` or `..`,
+      without `/`, NUL or another control character (U+0001-U+001F, U+007F),
+      and without lone surrogates. Longer names fail with `ENAMETOOLONG`,
+      others with `EINVAL`, in the library and the native mount alike.
+      Windows allows 255 UTF-16 units, so a Windows name of more than 85
+      three-byte characters (such as CJK) is refused here.
+    - `chunkSize` is an integer from 1 to 4 MiB (`MAX_FILE_CHUNK_SIZE`), else
+      `EINVAL`. A version lists at most 65,536 chunks
+      (`MAX_FILE_VERSION_CHUNKS`, repeats included) and 8,000 distinct ones:
+      32 GiB at the default 512 KiB chunk, 256 GiB at 4 MiB. A larger write
+      fails with `EFBIG` (raise `chunkSize`); a native mount commits at the
+      default chunk size, so a mounted file is at most 32 GiB (`EFBIG`). A
+      version whose chunks do not add up to its size is not read (`EIO`).
+    - `causalDepth`, which ranks heads, is at most 2^53-1
+      (`MAX_CAUSAL_DEPTH`); a writer saturates there instead of exceeding it.
+      At the cap, a child still replaces its parent as a head, and concurrent
+      heads tie on depth, so the smaller id wins.
+    - Releases before these limits accept such rows, so a mixed fleet can hold
+      a row the newer peers refuse; they refuse it and keep syncing the rest.
 
 Naming (placement and deletion) is a per-node causal event DAG, mirroring the
 content version DAG: renames and deletes append immutable events, content

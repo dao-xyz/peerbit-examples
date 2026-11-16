@@ -352,6 +352,10 @@ mtime on every file version. The adapter maps the POSIX calls onto them:
   every host's readlink buffer returns untruncated, so Linux targets of
   1024-4095 bytes are refused. `readlink` fails with `EIO` while the link's
   version is not stored locally. Hard links stay `ENOSYS`.
+- Creating or renaming to a name of more than 255 bytes of UTF-8 fails with
+  `ENAMETOOLONG`, and one holding a control character (U+0001-U+001F, U+007F)
+  with `EINVAL`, before anything is written. Growing a file past 32 GiB
+  (65,536 chunks of 512 KiB) fails with `EFBIG` at the write or truncate.
 - `access(2)` checks that the path exists and, off Windows, that `X_OK` on a
   regular file finds an exec bit, so `test -x` agrees with `execve`. It does
   not check read or write masks. Modes and owners are not an authorization

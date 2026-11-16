@@ -297,6 +297,23 @@ export const chunkIdForBytes = (bytes: Uint8Array) =>
     `chunk:${sha256Base64Sync(bytes)}`;
 
 /**
+ * Ingest bounds; a writer never exceeds them. The largest chunk, and so
+ * the largest `chunkSize`: its document stays under the 5 MB document cap.
+ */
+export const MAX_FILE_CHUNK_SIZE = 4 * 1024 * 1024;
+/**
+ * The longest chunk list, repeats included (a sparse file repeats its zero
+ * chunk), so its FileVersion stays under the document cap too: 32 GiB per
+ * version at the default chunk size, 256 GiB at MAX_FILE_CHUNK_SIZE.
+ */
+export const MAX_FILE_VERSION_CHUNKS = 65_536;
+/**
+ * The deepest causalDepth (2^53 - 1, exact as a number): writers saturate
+ * there and deeper rows are refused, so a write can always follow any row.
+ */
+export const MAX_CAUSAL_DEPTH = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
  * A content-addressed block of file bytes. The id is derived from the bytes
  * (`chunk:<sha256>`), so identical content — across versions of one file or
  * across different files — is stored exactly once and shared by every
