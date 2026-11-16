@@ -10,18 +10,21 @@ import { NamingEvent } from "../model.js";
  * hold twice waited its whole 30 s ("no history arrived during open", 2 of
  * 98 runs), and a dedicated loop of 175 holds did not reproduce it. A
  * diagnosed hold records the label's way into the joiner; when the bound
- * expires it takes a snapshot, keeps the open running until the label
- * commits or HOLD_TOTAL_MS after the hold started, takes another and fails
- * with a class:
+ * expires it takes a snapshot, keeps the open running until the hold finds
+ * the label committed or HOLD_TOTAL_MS after the hold started, takes
+ * another and fails with a class:
  *
  * - A, hold detection did not fire: the label was committed to the store
- *   by the bound (its change event or its index row), but the hold, which
- *   waits for that change event and then a commit diagnostic, did not
- *   release. A test bug.
+ *   by the bound (in the joiner's log and its index), but the hold, which
+ *   checks the store on each change event and commit diagnostic, did not
+ *   release. A test bug. The hold used to wait for a commit diagnostic
+ *   after the label's change event; an entry that arrives in plain
+ *   exchange heads is joined on its own and emits none, so that hold sat
+ *   out its bound with the label committed.
  * - B, delivery liveness (upstream): by the bound no exchange message had
  *   carried the label to the joiner's shared log, and its log lacked it.
- * - C, joiner commit: the joiner had the label (received, or in its log)
- *   by the bound but had not committed it to the store.
+ * - C, joiner commit: the joiner had the label (received, in its log, or
+ *   in a change event) by the bound but had not committed it to the store.
  *
  * Until the bound only synchronous recording runs: a passing hold takes
  * no extra time.
@@ -64,6 +67,17 @@ export const writeLabel = async (
     return written;
 };
 
+/**
+ * Whether `documents`, a filesystem store, holds an entry: in its log (by
+ * the entry's hash) and in its index (by the document's id). The hold
+ * releases when both hold, and the snapshots read the same.
+ */
+export const logHas = async (documents: any, hash: string) =>
+    (await documents.log.log.has(hash)) === true;
+export const indexHas = async (documents: any, id: string) =>
+    (await documents.index.get(id, { local: true, remote: false })) !==
+    undefined;
+
 /** A read that gave up or failed reads "timeout" or "error". */
 type Read<T> = T | "timeout" | "error" | "unknown";
 
@@ -99,13 +113,23 @@ export interface HoldFacts {
     receivedBy?: string;
     /** The joiner's canPerformEntry for the label. */
     canPerform?: { startAt: number; endAt?: number; result?: string };
-    /** The change event that carried the label: it was committed. */
+    /** The first change event that carried the label. */
+    changedAt?: number;
+    /**
+     * The hold's store checks of the label (on each change event and commit
+     * diagnostic from its change event on), and what the last one read.
+     */
+    checks: number;
+    lastCheck?: {
+        at: number;
+        inLog: boolean | "error";
+        inIndex: boolean | "error";
+    };
+    /** A store check found the label in the log and the index. */
     committedAt?: number;
-    /** The commit diagnostics the hold waits for. */
+    /** Commit diagnostics: batch joins emit them, per-entry joins none. */
     commitDiagnostics: number[];
     changes: number;
-    /** Change events that reset a pending match before a diagnostic. */
-    clobbered: number;
     loopDelayMaxMs?: number;
     atBound: HoldSnapshot;
     atEnd: HoldSnapshot;
@@ -136,20 +160,27 @@ export const classifyHold = (facts: HoldFacts): HoldClass => {
         facts.committedAt !== undefined && !by(facts.committedAt)
             ? `after the bound it ${later.join(" and ")}`
             : `it had ${later.length ? `${later.join(" and ")} but not ` : "not "}committed when the diagnosis gave up at ${seconds(facts.endAt)}`;
-    if (by(facts.committedAt) || atBound.inIndex === true) {
-        const after = by(facts.committedAt)
-            ? facts.commitDiagnostics.filter((t) => t >= facts.committedAt!)
-                  .length
-            : 0;
+    if (
+        by(facts.committedAt) ||
+        (atBound.inLog === true && atBound.inIndex === true)
+    ) {
+        const last = facts.lastCheck;
         return {
             code: "A",
             name: "hold detection did not fire",
             text: by(facts.committedAt)
-                ? `the label committed at ${seconds(facts.committedAt)}, but no commit diagnostic released the hold after its change event (${facts.commitDiagnostics.length} diagnostics, ${after} after it; ${facts.clobbered} later change events reset the match)`
-                : "the label was in the joiner's index at the bound, but no change event carried it",
+                ? `a store check found the label in the joiner's log and index at ${seconds(facts.committedAt)}, but the hold had not released by the bound`
+                : by(facts.changedAt)
+                  ? `the label was in the joiner's log and index at the bound and a change event carried it at ${seconds(facts.changedAt)}, but no store check released the hold (${facts.checks} checks${last ? `; the last, at ${seconds(last.at)}, read in log ${last.inLog}, in index ${last.inIndex}` : ""})`
+                  : "the label was in the joiner's log and index at the bound, but no change event carried it, so the hold never checked the store",
         };
     }
-    if (by(facts.receivedAt) || atBound.inLog === true) {
+    if (
+        by(facts.receivedAt) ||
+        by(facts.changedAt) ||
+        atBound.inLog === true ||
+        atBound.inIndex === true
+    ) {
         const call = facts.canPerform;
         const check =
             call === undefined || call.startAt > boundAt
@@ -157,10 +188,18 @@ export const classifyHold = (facts: HoldFacts): HoldClass => {
                 : call.endAt === undefined || call.endAt > boundAt
                   ? `its canPerformEntry was pending from ${seconds(call.startAt)}`
                   : `its canPerformEntry returned ${call.result} at ${seconds(call.endAt)}`;
+        const had = by(facts.receivedAt)
+            ? `the joiner received the label at ${seconds(facts.receivedAt)}`
+            : atBound.inLog === true
+              ? "the label was in the joiner's log at the bound (by a path not recorded)"
+              : "the joiner had the label by the bound (by a path not recorded)";
+        const changed = by(facts.changedAt)
+            ? `; a change event carried it at ${seconds(facts.changedAt)}`
+            : "";
         return {
             code: "C",
             name: "joiner commit",
-            text: `${by(facts.receivedAt) ? `the joiner received the label at ${seconds(facts.receivedAt)}` : "the label was in the joiner's log at the bound (by a path not recorded)"} but had not committed it by the bound: ${check}; joining ${atBound.joining}, in log ${atBound.inLog}; ${afterBound}`,
+            text: `${had} but had not committed it to the store by the bound: ${check}${changed}; joining ${atBound.joining}, in log ${atBound.inLog}, in index ${atBound.inIndex}; ${afterBound}`,
         };
     }
     if (facts.label.hash === undefined) {
@@ -201,8 +240,9 @@ const hashesOf = (heads: unknown): string[] =>
 /**
  * Records a diagnosed hold of `documents`, the joiner's store, from the
  * start of its open: the label's arrival at the joiner's shared log and its
- * canPerformEntry. The hold reports its change events and commit
- * diagnostics; `fail` diagnoses a bound that expired. `stop` undoes it.
+ * canPerformEntry. The hold reports its change events, store checks and
+ * commit diagnostics; `fail` diagnoses a bound that expired. `stop` undoes
+ * it.
  */
 export const diagnoseHold = (
     documents: any,
@@ -219,14 +259,10 @@ export const diagnoseHold = (
     const facts: Omit<HoldFacts, "boundAt" | "endAt" | "atBound" | "atEnd"> = {
         label,
         holdAt: 0,
+        checks: 0,
         commitDiagnostics: [],
         changes: 0,
-        clobbered: 0,
     };
-    let labelCommitted!: () => void;
-    const committed = new Promise<void>(
-        (resolve) => (labelCommitted = resolve)
-    );
     const loop = monitorEventLoopDelay({ resolution: 20 });
     loop.enable();
     const undo: Array<() => void> = [() => loop.disable()];
@@ -318,19 +354,13 @@ export const diagnoseHold = (
         ] = await Promise.all([
             hash === undefined
                 ? ("unknown" as const)
-                : within(() => log.has(hash) as Promise<boolean>),
+                : within(() => logHas(documents, hash)),
             hash === undefined
                 ? ("unknown" as const)
                 : within(() => Boolean(log._joining?.has?.(hash))),
             id === undefined
                 ? ("unknown" as const)
-                : within(
-                      async () =>
-                          (await documents.index.get(id, {
-                              local: true,
-                              remote: false,
-                          })) !== undefined
-                  ),
+                : within(() => indexHas(documents, id)),
             within(
                 () =>
                     peer.libp2p.getConnections(donor.peer.peerId)
@@ -364,40 +394,56 @@ export const diagnoseHold = (
             facts.holdAt = since();
         },
         /** A change event; `matched`: it carried the label. */
-        onChange: (matched: boolean, wasPending: boolean) => {
+        onChange: (matched: boolean) => {
             facts.changes++;
             if (matched) {
+                facts.changedAt ??= since();
+            }
+        },
+        /** A store check of the entry `hash` read these. */
+        onCheck: (
+            hash: string,
+            inLog: boolean | "error",
+            inIndex: boolean | "error"
+        ) => {
+            if (hash !== label.hash) {
+                return;
+            }
+            facts.checks++;
+            facts.lastCheck = { at: since(), inLog, inIndex };
+            if (inLog === true && inIndex === true) {
                 facts.committedAt ??= since();
-                labelCommitted();
-            } else if (wasPending) {
-                facts.clobbered++;
             }
         },
         onCommitDiagnostic: () => {
             facts.commitDiagnostics.push(since());
         },
         /**
-         * The bound expired: snapshots, keeps the open running until the
-         * label commits (or `released`, the hold's own detection) or
-         * HOLD_TOTAL_MS after the hold started, and returns the error the
-         * hold fails with.
+         * The bound expired: snapshots and, unless the store held the label
+         * then, keeps the open running until the hold finds it committed
+         * (`released`) or HOLD_TOTAL_MS after the hold started; returns the
+         * error the hold fails with.
          */
         fail: async (released: Promise<void>): Promise<Error> => {
             const boundAt = since();
             try {
                 const atBound = await snapshot();
-                let giveUp: ReturnType<typeof setTimeout> | undefined;
-                await Promise.race([
-                    committed,
-                    released,
-                    new Promise<void>((resolve) => {
-                        giveUp = setTimeout(
-                            resolve,
-                            Math.max(0, facts.holdAt + HOLD_TOTAL_MS - since())
-                        );
-                    }),
-                ]);
-                clearTimeout(giveUp);
+                if (atBound.inLog !== true || atBound.inIndex !== true) {
+                    let giveUp: ReturnType<typeof setTimeout> | undefined;
+                    await Promise.race([
+                        released,
+                        new Promise<void>((resolve) => {
+                            giveUp = setTimeout(
+                                resolve,
+                                Math.max(
+                                    0,
+                                    facts.holdAt + HOLD_TOTAL_MS - since()
+                                )
+                            );
+                        }),
+                    ]);
+                    clearTimeout(giveUp);
+                }
                 const endAt = since();
                 const atEnd = await snapshot();
                 const all: HoldFacts = {

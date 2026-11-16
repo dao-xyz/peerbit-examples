@@ -38,6 +38,8 @@ import { SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import { OpenV1 } from "../readiness/wire.js";
 import {
     diagnoseHold,
+    indexHas,
+    logHas,
     writeLabel,
     type Label,
 } from "./cold-start-hold-diagnosis.js";
@@ -168,8 +170,16 @@ describe("shared fs cold-start bootstrap", () => {
      * `inLog` it sits right after the store's log opened, before the rest of
      * Documents.open has run.
      *
-     * The hold releases on the batch's commit diagnostic, not its change
-     * event, so the open resolves with the batch committed to the store.
+     * A matching document is committed once the store holds it: its entry
+     * in the log and its row in the index. Each change event and each commit
+     * diagnostic checks the matches seen so far, so the hold releases
+     * however the history arrived, and never on a change event alone.
+     * Documents dispatches a change event after it wrote the event's rows to
+     * the index, and every join puts the entry in the log before that, so a
+     * matching change event's own check finds it. Only batch joins emit a
+     * commit diagnostic (log.joinPreparedFacts.change,
+     * log.joinIndependent.change): an entry that arrives in plain exchange
+     * heads is joined on its own and emits none.
      * With `diagnose` (the donor and the label it wrote), a hold that sits
      * out its bound fails with the reason (cold-start-hold-diagnosis.ts).
      */
@@ -212,31 +222,53 @@ describe("shared fs cold-start bootstrap", () => {
                 const arrived = new Promise<void>(
                     (resolve) => (committed = resolve)
                 );
-                let pending = false;
+                let stored = false;
+                /** Matching documents from change events: entry hash to id. */
+                const matched = new Map<string, string>();
+                const tryRead = (value: Promise<boolean>) =>
+                    value.catch(() => "error" as const);
+                const check = async () => {
+                    for (const [hash, id] of [...matched]) {
+                        if (stored) {
+                            return;
+                        }
+                        const [inLog, inIndex] = await Promise.all([
+                            tryRead(logHas(this, hash)),
+                            tryRead(indexHas(this, id)),
+                        ]);
+                        diagnosis?.onCheck(hash, inLog, inIndex);
+                        if (inLog === true && inIndex === true) {
+                            stored = true;
+                            committed();
+                        }
+                    }
+                };
                 const onChange = (event: any) => {
-                    const wasPending = pending;
-                    pending = (event?.detail?.added ?? []).some(matches);
+                    const added = (event?.detail?.added ?? []).filter(matches);
                     held.changes++;
-                    if (pending) {
+                    if (added.length > 0) {
                         held.batches++;
                     }
-                    diagnosis?.onChange(pending, wasPending);
+                    for (const value of added) {
+                        const hash = value?.__context?.head;
+                        if (typeof hash === "string" && value.id) {
+                            matched.set(hash, value.id);
+                        }
+                    }
+                    diagnosis?.onChange(added.length > 0);
+                    void check();
                 };
                 const sync = args[0].sync;
                 const profile = sync.profile;
                 sync.profile = (event: { name: string }) => {
-                    const commit =
-                        event.name === "log.joinPreparedFacts.change" ||
-                        event.name === "log.joinIndependent.change";
                     profile?.(event);
-                    if (!commit) {
-                        return;
+                    if (
+                        event.name === "log.joinPreparedFacts.change" ||
+                        event.name === "log.joinIndependent.change"
+                    ) {
+                        diagnosis?.onCommitDiagnostic();
+                        void check();
                     }
-                    diagnosis?.onCommitDiagnostic();
-                    if (pending) {
-                        committed();
-                    }
-                    pending = false;
                 };
                 let bound: ReturnType<typeof setTimeout> | undefined;
                 const hold = async () => {
