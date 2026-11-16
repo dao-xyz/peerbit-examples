@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyCompactedOutput } from "./compact-emitted-javascript.mjs";
+import { lfUnpackedSize } from "./lf-normalized-size.mjs";
 
 const repositoryRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -15,14 +16,15 @@ const rootLicense = await readFile(
     "utf8"
 );
 
+// maxUnpackedBytes budgets the published tarball, which is packed on Linux
+// from an LF checkout. Packed text files are counted with LF line endings
+// (see lf-normalized-size.mjs), so every OS measures the same size.
 const packages = [
     {
         directory: "packages/shared-fs/library",
         name: "@peerbit/shared-fs",
-        // The readiness modules ship as both src and lib. Windows checkouts
-        // measure about 1.3% larger (CRLF line endings); the published
-        // tarball is packed on Linux.
-        // M2 warm freshness: 4.10 MB on macOS, about 4.16 MB on Windows.
+        // The readiness modules ship as both src and lib.
+        // M2 warm freshness: 4.10 MB.
         maxUnpackedBytes: 4_200_000,
         requiredPaths: [
             "LICENSE",
@@ -247,10 +249,17 @@ for (const specification of packages) {
             `unpacked size ${formatBytes(manifest.unpackedSize)} does not match file sum ${formatBytes(calculatedUnpackedBytes)}`
         );
     }
-    if (calculatedUnpackedBytes > specification.maxUnpackedBytes) {
+    const lfUnpackedBytes = await lfUnpackedSize(packageRoot, files).catch(
+        (error) =>
+            fail(
+                specification.name,
+                error instanceof Error ? error.message : String(error)
+            )
+    );
+    if (lfUnpackedBytes > specification.maxUnpackedBytes) {
         fail(
             specification.name,
-            `unpacked size ${formatBytes(calculatedUnpackedBytes)} exceeds budget ${formatBytes(specification.maxUnpackedBytes)}`
+            `unpacked size with LF line endings ${formatBytes(lfUnpackedBytes)} exceeds budget ${formatBytes(specification.maxUnpackedBytes)} (${formatBytes(calculatedUnpackedBytes)} as checked out)`
         );
     }
 
@@ -279,6 +288,6 @@ for (const specification of packages) {
     }
 
     console.log(
-        `${specification.name}: ${paths.length} files, ${formatBytes(calculatedUnpackedBytes)} unpacked bytes (budget ${formatBytes(specification.maxUnpackedBytes)})`
+        `${specification.name}: ${paths.length} files, ${formatBytes(calculatedUnpackedBytes)} unpacked bytes as checked out, ${formatBytes(lfUnpackedBytes)} with LF line endings (budget ${formatBytes(specification.maxUnpackedBytes)})`
     );
 }
