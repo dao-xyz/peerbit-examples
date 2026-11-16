@@ -221,7 +221,10 @@ test "$(cat "$mountpoint/docs/hello.txt")" = "hello external native"
 # Conflict copies live in /.peerbit-conflicts: never listed in /, always there
 # by name, and every write inside fails with EROFS.
 conflicts_dir="$mountpoint/.peerbit-conflicts"
-if ls -A "$mountpoint" | grep -Fqx .peerbit-conflicts; then
+# Listed first: under pipefail, grep -q quitting early could SIGPIPE ls and
+# turn a found name into a pass.
+root_names="$(ls -A "$mountpoint")"
+if grep -Fqx .peerbit-conflicts <<<"$root_names"; then
   echo "/.peerbit-conflicts must not be listed in /" >&2
   exit 1
 fi
