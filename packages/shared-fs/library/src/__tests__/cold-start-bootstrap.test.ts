@@ -36,6 +36,11 @@ import {
 import type { ReadinessRuntime } from "../readiness/runtime.js";
 import { SCOPE_NAMESPACE_V1 } from "../readiness/scopes.js";
 import { OpenV1 } from "../readiness/wire.js";
+import {
+    diagnoseHold,
+    writeLabel,
+    type Label,
+} from "./cold-start-hold-diagnosis.js";
 import { holdCuts } from "./readiness-cut-hold.js";
 import { holdFlips } from "./readiness-flip-hold.js";
 import { watchTimers } from "./readiness-timer-watch.js";
@@ -165,12 +170,20 @@ describe("shared fs cold-start bootstrap", () => {
      *
      * The hold releases on the batch's commit diagnostic, not its change
      * event, so the open resolves with the batch committed to the store.
+     * With `diagnose` (the donor and the label it wrote), a hold that sits
+     * out its bound fails with the reason (cold-start-hold-diagnosis.ts).
      */
     const holdOpenUntilHistory = (
         peer: Peerbit,
         matches: (value: unknown) => boolean = (value) =>
             value instanceof FileVersion,
-        options: { inLog?: boolean } = {}
+        options: {
+            inLog?: boolean;
+            diagnose?: {
+                donor: { peer: Peerbit; fs: SharedFsHandle };
+                label: Label;
+            };
+        } = {}
     ) => {
         const documentsOpen = Documents.prototype.open;
         const held = {
@@ -192,17 +205,22 @@ describe("shared fs cold-start bootstrap", () => {
                 ) {
                     return documentsOpen.apply(this, args as any);
                 }
+                const diagnosis =
+                    options.diagnose &&
+                    diagnoseHold(this, { peer, ...options.diagnose });
                 let committed!: () => void;
                 const arrived = new Promise<void>(
                     (resolve) => (committed = resolve)
                 );
                 let pending = false;
                 const onChange = (event: any) => {
+                    const wasPending = pending;
                     pending = (event?.detail?.added ?? []).some(matches);
                     held.changes++;
                     if (pending) {
                         held.batches++;
                     }
+                    diagnosis?.onChange(pending, wasPending);
                 };
                 const sync = args[0].sync;
                 const profile = sync.profile;
@@ -214,6 +232,7 @@ describe("shared fs cold-start bootstrap", () => {
                     if (!commit) {
                         return;
                     }
+                    diagnosis?.onCommitDiagnostic();
                     if (pending) {
                         committed();
                     }
@@ -221,20 +240,27 @@ describe("shared fs cold-start bootstrap", () => {
                 };
                 let bound: ReturnType<typeof setTimeout> | undefined;
                 const hold = async () => {
-                    await Promise.race([
-                        arrived,
-                        new Promise((_, reject) => {
-                            bound = setTimeout(
-                                () =>
-                                    reject(
-                                        new Error(
-                                            "no history arrived during open"
-                                        )
-                                    ),
-                                30_000
-                            );
-                        }),
-                    ]);
+                    diagnosis?.holdStarted();
+                    try {
+                        await Promise.race([
+                            arrived,
+                            new Promise((_, reject) => {
+                                bound = setTimeout(
+                                    () =>
+                                        reject(
+                                            new Error(
+                                                "no history arrived during open"
+                                            )
+                                        ),
+                                    30_000
+                                );
+                            }),
+                        ]);
+                    } catch (error) {
+                        // Diagnosed: keeps the open running until the label
+                        // commits or 120 s in all, then fails with the class.
+                        throw diagnosis ? await diagnosis.fail(arrived) : error;
+                    }
                     held.arrived = true;
                 };
                 const log = (this as any).log;
@@ -256,6 +282,7 @@ describe("shared fs cold-start bootstrap", () => {
                     return result;
                 } finally {
                     clearTimeout(bound);
+                    diagnosis?.stop();
                     this.events.removeEventListener("change", onChange);
                     if (options.inLog && ownLogOpen) {
                         log.open = logOpen;
@@ -2233,7 +2260,7 @@ describe("shared fs cold-start bootstrap", () => {
                     bootstrap: false | { discoveryTimeoutMs: number },
                     at = directory
                 ) => {
-                    await donor.writeFile(`/${label}.txt`, label);
+                    const written = await writeLabel(donor, label);
                     joinerPeer = await Peerbit.create({ directory: at });
                     // The postures below are a failed bootstrap's: the cut,
                     // which ends one on a readiness proof, stays held.
@@ -2243,7 +2270,13 @@ describe("shared fs cold-start bootstrap", () => {
                         joinerPeer,
                         (value) =>
                             value instanceof NamingEvent &&
-                            value.name === `${label}.txt`
+                            value.name === written.name,
+                        {
+                            diagnose: {
+                                donor: { peer: donorPeer, fs: donor },
+                                label: written,
+                            },
+                        }
                     );
                     let fs: SharedFsHandle;
                     try {
