@@ -59,11 +59,14 @@ jobs:
                   commit: Version Packages
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  # npm publishes with npm trusted publishing: each package's
+                  # npm publishes with npm trusted publishing. Each package's
                   # trusted publisher on npmjs.com names this repository and
-                  # release.yml. The NPM_TOKEN secret is an optional fallback
-                  # that npm uses only when the OIDC exchange fails; without
-                  # the secret both variables are empty.
+                  # release.yml, has no environment, and allows npm publish.
+                  # While the NPM_TOKEN secret is set, npm sends it with every
+                  # registry request in this step, and publishes with it
+                  # without a warning when the OIDC exchange fails. Delete the
+                  # secret once a release has published through trusted
+                  # publishing; both variables are then empty.
                   NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
                   NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
                   NPM_CONFIG_PROVENANCE: true

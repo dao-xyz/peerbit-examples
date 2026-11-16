@@ -515,7 +515,13 @@ const publishPackages = (unpublished) => {
         );
         if (auth.trustedPublishing) {
             console.error(
-                `Check each package's trusted publisher on npmjs.com: it must name ${repo} and the workflow file that runs this script and allow npm publish, and a new one expires unless it publishes within 2 days. Without one, npm uses the npm token if one is set and otherwise fails with ENEEDAUTH.`
+                [
+                    "Check the trusted publisher of each package above on npmjs.com.",
+                    `It must name the repository ${repo} and the workflow file that runs this script.`,
+                    "It must have no environment, and it must allow npm publish.",
+                    "A new trusted publisher expires if it has not published within 2 days.",
+                    "For a package without a trusted publisher, npm publishes with the npm token if one is set, and otherwise fails with ENEEDAUTH.",
+                ].join("\n")
             );
         }
         throw error;

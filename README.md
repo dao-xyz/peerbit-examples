@@ -105,19 +105,44 @@ The workflow publishes with
 [npm trusted publishing](https://docs.npmjs.com/trusted-publishers), so it needs
 no npm secret: npm 11.5.1 or later (the workflow runs Node 24) exchanges the
 job's OIDC id-token for a short-lived publish token, and each version still gets
-provenance. Every package it publishes needs a trusted publisher in its settings
-on npmjs.com: GitHub Actions, organization `dao-xyz`, repository
-`peerbit-examples`, workflow filename `release.yml`, no environment, and under
-"Allowed actions" "Allow npm publish" ticked: without it a new trusted
-publisher allows only `npm stage publish`, and the release fails. npm expires a
-new trusted publisher that has not published within 2 days, so add it shortly
-before the package's next release. A package that is not on npm yet has no
-settings page, so its first version needs the token or a manual publish.
+provenance. Each package needs a trusted publisher in its settings on npmjs.com:
 
-The `NPM_TOKEN` repository secret is an optional fallback. npm tries trusted
-publishing first and uses the token only when that exchange fails, for example
-for a package without a trusted publisher; without the secret, such a package
-fails to publish.
+- GitHub Actions, organization `dao-xyz`, repository `peerbit-examples`,
+  workflow filename `release.yml`, and no environment.
+- "Allow npm publish" ticked under "Allowed actions". Without it, the trusted
+  publisher allows only `npm stage publish`, and the release fails.
+
+With npm 11.15.0 or later, this command creates the same trusted publisher:
+
+```sh
+npm trust github <package> --repo dao-xyz/peerbit-examples \
+    --file release.yml --allow-publish --yes
+```
+
+`npm trust list <package> --json` must then show `createPackage` in
+`permissions`. `createStagedPackage` alone means stage publish only.
+
+Every package that the Version Packages pull request bumps needs its trusted
+publisher, with npm publish allowed, before that pull request merges. npm
+expires a new trusted publisher that has not published within 2 days, so add it
+shortly before the merge. npm authenticates each package on its own, and
+Changesets publishes them in parallel, so a package without its trusted
+publisher can fail while the others publish. For example, a new
+`@peerbit/shared-fs-cli` could publish while the `@peerbit/shared-fs` version it
+pins fails. `npm i -g @peerbit/shared-fs-cli` then fails with `ETARGET` until
+that version is published. To publish it, fix the trusted publisher and re-run
+the failed Release job.
+
+A package that is not on npm yet has no settings page, so its first version
+needs a token or a manual publish.
+
+The `NPM_TOKEN` repository secret is a fallback. While it is set, npm sends it
+with every registry request of the publish step. When the exchange fails, npm
+publishes with the token without a warning. A broken trusted publisher then
+goes unnoticed, and a new one that never publishes expires after 2 days. So
+delete the secret once a release has published through trusted publishing, as
+npm advises. `npm view <package>@<version> _npmUser` names `GitHub Actions` for
+such a version.
 
 ## Cloudflare hosting
 

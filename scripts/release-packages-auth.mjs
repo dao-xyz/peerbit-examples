@@ -3,15 +3,15 @@
 // npm trusted publishing needs no secret. In a GitHub Actions job granted
 // `id-token: write`, the runner sets ACTIONS_ID_TOKEN_REQUEST_URL and
 // ACTIONS_ID_TOKEN_REQUEST_TOKEN, and npm 11.5.1 or later exchanges the job's
-// OIDC id-token for a short-lived token that publishes one package. The
-// registry grants it only for a package whose trusted publisher on npmjs.com
-// names this repository and workflow file.
+// OIDC id-token for a short-lived token that publishes one package. This
+// works only for a package whose trusted publisher on npmjs.com names this
+// repository and workflow file, has no environment, and allows npm publish.
 //
 // An npm token in NPM_TOKEN or NODE_AUTH_TOKEN is an optional fallback: npm
-// tries the exchange first and keeps the configured token only when the
-// exchange fails, for example for a package without a trusted publisher
-// (npm/cli lib/utils/oidc.js). In GitHub Actions a missing secret reads as an
-// empty string, which counts as no token.
+// tries the exchange first and, when the exchange fails, publishes with the
+// configured token without a warning, for example for a package without a
+// trusted publisher (npm/cli lib/utils/oidc.js). In GitHub Actions a missing
+// secret reads as an empty string, which counts as no token.
 
 /** The first npm release that publishes with trusted publishing. */
 export const TRUSTED_PUBLISHING_NPM_VERSION = "11.5.1";
