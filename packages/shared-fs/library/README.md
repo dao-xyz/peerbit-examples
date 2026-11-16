@@ -103,24 +103,47 @@ important for any deployment with more than one writer:
   ingest and at snapshot install, so one buggy or hostile writer cannot
   publish them; local writes fail before writing anything:
     - A name is 1-255 bytes of UTF-8 (`MAX_NAME_BYTES`), not `.` or `..`,
-      without `/`, NUL or another control character (U+0001-U+001F, U+007F),
-      and without lone surrogates. Longer names fail with `ENAMETOOLONG`,
-      others with `EINVAL`, in the library and the native mount alike.
-      Windows allows 255 UTF-16 units, so a Windows name of more than 85
-      three-byte characters (such as CJK) is refused here.
+      without `/`, `\` (a path separator here), NUL or another control
+      character (U+0001-U+001F, U+007F), and without lone surrogates. Longer
+      names fail with `ENAMETOOLONG`, others with `EINVAL`, in the library
+      and the native mount alike. On Linux and macOS, where `\` is a name
+      character, the mount refuses to create such a name or rename from or
+      to one (`EINVAL`) and finds none otherwise (`ENOENT`) instead of
+      reading it as a path. macOS Finder's custom folder icon file, `Icon\r`,
+      is refused (`EINVAL`) for its control character. Windows allows 255
+      UTF-16 units, so a Windows name of more than 85 three-byte characters
+      (such as CJK) is refused here.
     - `chunkSize` is an integer from 1 to 4 MiB (`MAX_FILE_CHUNK_SIZE`), else
       `EINVAL`. A version lists at most 65,536 chunks
-      (`MAX_FILE_VERSION_CHUNKS`, repeats included) and 8,000 distinct ones:
-      32 GiB at the default 512 KiB chunk, 256 GiB at 4 MiB. A larger write
-      fails with `EFBIG` (raise `chunkSize`); a native mount commits at the
-      default chunk size, so a mounted file is at most 32 GiB (`EFBIG`). A
-      version whose chunks do not add up to its size is not read (`EIO`).
+      (`MAX_FILE_VERSION_CHUNKS`, repeats included), at most 8,000 of them
+      distinct. Only repeated chunks (a sparse file) reach 32 GiB at the
+      default 512 KiB chunk or 256 GiB at 4 MiB; past that a write fails
+      with `EFBIG`. Distinct bytes stop at 8,000 chunks, about 3.9 GiB at
+      512 KiB or 31 GiB at 4 MiB; past that a write fails with `EINVAL`
+      (raise `chunkSize`). A native mount commits at the default chunk size:
+      a write or truncate past 32 GiB fails with `EFBIG`, and a commit of
+      more distinct bytes than 3.9 GiB with `EINVAL`. Reads load a whole
+      version, but sum and hash its chunks before assembling them: a version
+      whose chunks do not match its size or hash fails with `EIO` without
+      being allocated. A forged row can still make a reader hash as much as
+      it claims (at most 256 GiB) before it fails.
+    - A version or naming event lists at most 8,000 parents. A write over
+      more content heads (a head flood) supersedes the 8,000 best-ranked and
+      still shows; the rest stay heads (a conflict, where their bytes
+      differ) until later writes supersede them. Renaming or removing a node
+      over more than 8,000 naming heads fails with `EINVAL`.
     - `causalDepth`, which ranks heads, is at most 2^53-1
       (`MAX_CAUSAL_DEPTH`); a writer saturates there instead of exceeding it.
       At the cap, a child still replaces its parent as a head, and concurrent
-      heads tie on depth, so the smaller id wins.
+      heads tie on depth, so they order as at any equal depth: for names, a
+      head that keeps the node beats a removal; then the smaller id wins.
     - Releases before these limits accept such rows, so a mixed fleet can hold
       a row the newer peers refuse; they refuse it and keep syncing the rest.
+      A file or directory named outside these rules before them can be read
+      and renamed, but writing, removing or keeping it under that name fails
+      (`EINVAL` or `ENAMETOOLONG`): rename it first. Newer peers also refuse
+      an older peer's removal of it. No path reaches a name holding `\`, so
+      move such a node by its id: `resolveNamingConflict` with a `move`.
 
 Naming (placement and deletion) is a per-node causal event DAG, mirroring the
 content version DAG: renames and deletes append immutable events, content

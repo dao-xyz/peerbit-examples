@@ -5,8 +5,10 @@ export const CONFLICTS_DIR = ".peerbit-conflicts";
 export const MAX_NAME_BYTES = 255;
 
 const utf8 = new TextEncoder();
-// C0 controls, DEL, and lone surrogates (they have no UTF-8 form).
-const BAD_NAME_CHAR = /[\u0000-\u001f\u007f]|\p{Cs}/u;
+// C0 controls, DEL, a backslash (a path reads it as "/"), and lone
+// surrogates (they have no UTF-8 form).
+// eslint-disable-next-line no-control-regex
+const BAD_NAME_CHAR = /[\u0000-\u001f\u007f\\]|\p{Cs}/u;
 
 /**
  * Why `name` cannot name a file or directory, or undefined when it can:
@@ -32,7 +34,7 @@ export const fsNameErrorMessage = (
 ) =>
     code === "ENAMETOOLONG"
         ? `Name is longer than ${MAX_NAME_BYTES} bytes of UTF-8: ${name.slice(0, 32)}...`
-        : `Name is empty, "." or "..", or holds "/" or a control character: ${JSON.stringify(name)}`;
+        : `Name is empty, "." or "..", or holds "/", "\\", a control character or a lone surrogate: ${JSON.stringify(name)}`;
 
 export const normalizeFsPath = (input: string) => {
     const raw = input || "/";

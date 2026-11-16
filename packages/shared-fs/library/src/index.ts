@@ -10,6 +10,7 @@ import {
     type PublicSignKey,
     PublicSignKey as PublicSignKeyType,
     SignatureWithKey,
+    createSHA256,
     fromBase64,
     randomBytes,
     sha256Base64Sync,
@@ -229,6 +230,12 @@ export const SHARED_FS_EXPERIMENTAL = true;
 export const DEFAULT_FILE_CHUNK_SIZE = 512 * 1024;
 /** Distinct chunks per version; see writeFile. */
 const MAX_FILE_VERSION_UNIQUE_CHUNKS = 8000;
+/**
+ * Parent ids per version or naming event. The indexer puts a list in one
+ * statement of 4 variables per id, under SQLite's 32,766 (8,191 ids), so a
+ * longer row fails after its log append. Writers never list more.
+ */
+const MAX_CAUSAL_PARENTS = 8000;
 
 export type SharedFsMountWriteOutcome = "unchanged" | "created";
 export type SharedFsMountOpenDescendant = { path: string; nodeId: string };
@@ -2283,6 +2290,15 @@ const maxDepth = (parents: { causalDepth: bigint }[]): bigint => {
 };
 
 /**
+ * The heads (best-ranked first) a new version supersedes: at most
+ * MAX_CAUSAL_PARENTS. Past that (a head flood) the rest stay heads, below
+ * the new version, which is deeper than all of them (at MAX_CAUSAL_DEPTH,
+ * ids break the tie); later writes supersede them in turn, so a flood never
+ * blocks a file.
+ */
+const supersededHeads = <T>(heads: T[]) => heads.slice(0, MAX_CAUSAL_PARENTS);
+
+/**
  * Heads restricted to the locally present document set. References to absent
  * ids are ignored. Preserve the existing head rule even for malformed cycles:
  * a locally referenced document is not a head. Winner ordering uses stored
@@ -2630,11 +2646,12 @@ const mapWithConcurrency = async <T, R>(
     return results;
 };
 
-const decodesToStringArray = (value: string) => {
+const decodesToStringArray = (value: string, max = Infinity) => {
     try {
         const parsed = JSON.parse(value);
         return (
             Array.isArray(parsed) &&
+            parsed.length <= max &&
             parsed.every((item) => typeof item === "string")
         );
     } catch {
@@ -3042,7 +3059,10 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
             // Reserved control-surface names never enter the shared tree
             // (the mount virtualizes them; a store entry would shadow).
             !value.name.startsWith(RESERVED_NAME_PREFIX) &&
-            decodesToStringArray(value.parentNamingIdsJson) &&
+            decodesToStringArray(
+                value.parentNamingIdsJson,
+                MAX_CAUSAL_PARENTS
+            ) &&
             decodesToStringArray(value.observedContentHeadsJson) &&
             value.causalDepth >= 1n &&
             value.causalDepth <= MAX_CAUSAL_DEPTH &&
@@ -3053,6 +3073,10 @@ const structurallyValidEntry = (value: SharedFsEntry): boolean => {
         return (
             value.id.startsWith("version:") &&
             value.nodeId.startsWith("file:") &&
+            decodesToStringArray(
+                value.parentVersionIdsJson,
+                MAX_CAUSAL_PARENTS
+            ) &&
             value.causalDepth >= 1n &&
             value.causalDepth <= MAX_CAUSAL_DEPTH &&
             validChunkList(value) &&
@@ -4982,6 +5006,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         }
     }
 
+    /**
+     * A remove or keep repeats the node's current name, which an older
+     * release may have stored outside fsNameError's rules: ingest would
+     * refuse the event, so fail typed and say how to get past it.
+     */
+    private assertStoredName(name: string) {
+        const invalid = fsNameError(name);
+        if (invalid) {
+            throw new SharedFsError(
+                invalid,
+                `${fsNameErrorMessage(invalid, name)} (stored before this rule; rename it first)`
+            );
+        }
+    }
+
     private signedMetadata() {
         return {
             authorKey: this.authorKey(),
@@ -6781,12 +6820,13 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         profiler?: SharedFsWriteFileProfiler;
     }) {
         const metadata = this.signedMetadata();
-        if (properties.parentHeads.length > 8000) {
+        if (properties.parentHeads.length > MAX_CAUSAL_PARENTS) {
             throw new SharedFsError(
                 "EINVAL",
                 "too many concurrent naming heads to supersede in one event"
             );
         }
+        this.assertStoredName(properties.name);
         const event = new NamingEvent({
             id: createId("naming"),
             nodeId: properties.nodeId,
@@ -7713,9 +7753,10 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         assertFileMeta(options, FILE_MODES);
         const noOpHeadVersionIds = options.noOpIfHeadVersionIds;
         if (noOpHeadVersionIds !== undefined) {
+            // Any number: past a head flood the write takes the best-ranked
+            // heads it can list (see supersededHeads).
             const validIds =
                 Array.isArray(noOpHeadVersionIds) &&
-                noOpHeadVersionIds.length <= 8000 &&
                 noOpHeadVersionIds.every(
                     (id) => typeof id === "string" && id.length > 0
                 );
@@ -7921,7 +7962,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 ? info
                 : { ...info, mountWriteOutcome: "unchanged" as const };
         }
-        if ((options.baseVersionIds?.length ?? 0) > 8000) {
+        if ((options.baseVersionIds?.length ?? 0) > MAX_CAUSAL_PARENTS) {
             // The indexer's batched child-table insert has a bound-variable
             // ceiling (~8191 rows), same as chunk references.
             throw new SharedFsError(
@@ -7976,12 +8017,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             // ordinary version, the write then ranks one deeper than every
             // parent, absorbed heads included: a recorded copy of such a
             // head keeps that head's depth, so it can never tie with a
-            // change made on top of it.
+            // change made on top of it. The best-ranked of them, past a head
+            // flood (see supersededHeads).
             const baseHashes = new Set(
                 parentVersions.map((parent) => parent.contentHash)
             );
             for (const head of currentHeads) {
                 if (
+                    parentVersionIds.length < MAX_CAUSAL_PARENTS &&
                     baseHashes.has(head.contentHash) &&
                     !parentVersionIds.includes(head.id)
                 ) {
@@ -7990,8 +8033,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 }
             }
         } else {
-            parentVersionIds = currentHeads.map((head) => head.id);
-            parentVersions = currentHeads;
+            parentVersions = supersededHeads(currentHeads);
+            parentVersionIds = parentVersions.map((head) => head.id);
         }
         // Same bytes as a current head (a metadata-only write): reuse its
         // chunk list with no chunk IO while every chunk is local. Heads are
@@ -8033,10 +8076,12 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         // has the mode of the version it copies, which stands in for it once
         // GC retires it (see metaMergeBase). The merge takes only concurrent
         // parents (see mergeHeadMeta): the opened version under a head the
-        // save took in is only a merge base candidate.
+        // save took in is only a merge base candidate. A copy may list one
+        // parent more, so a save over MAX_CAUSAL_PARENTS parents is not one.
         const ranked = [...parentVersions].sort(compareVersionRank);
         const parentMeta = await this.headMeta(ranked);
         const keepsParents =
+            parentVersionIds.length < MAX_CAUSAL_PARENTS &&
             options.chunkSize === undefined &&
             (noOpHeadVersionIds !== undefined ||
                 options.baseVersionIds === undefined) &&
@@ -8458,7 +8503,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     }
                     continue;
                 }
-                if (resolved.state.heads.length > 8000) {
+                if (resolved.state.heads.length > MAX_CAUSAL_PARENTS) {
                     // Same indexer bound appendNamingEvent enforces; throw
                     // before any document is put.
                     throw new SharedFsError(
@@ -8466,6 +8511,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                         "too many concurrent naming heads to supersede in one event"
                     );
                 }
+                this.assertStoredName(resolved.winner.name);
                 const contentHeads = await this.headsForNode(resolved.nodeId);
                 deleteNamingEvents.push(
                     new NamingEvent({
@@ -8575,33 +8621,35 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
             const nodeId = existingNodeId ?? createId("file");
             // Recorded as a copy of the heads (see writeFile); a head without
-            // a canonical id, or merged heads whose mode the visible one
-            // lacks, leave an ordinary version.
-            const mergedMeta = await this.headMeta(currentHeads);
+            // a canonical id, merged heads whose mode the visible one lacks,
+            // or MAX_CAUSAL_PARENTS heads (no room for a copy's extra
+            // parent) leave an ordinary version.
+            const parents = supersededHeads(currentHeads);
+            const mergedMeta = await this.headMeta(parents);
             const copyId =
-                unchanged && mergedMeta?.mode === currentHeads[0].mode
-                    ? recordedCopyId(currentHeads[0])
+                unchanged &&
+                parents.length < MAX_CAUSAL_PARENTS &&
+                mergedMeta?.mode === parents[0].mode
+                    ? recordedCopyId(parents[0])
                     : undefined;
+            const parentVersionIds = copyId
+                ? copyParentIds(
+                      parents.map((head) => head.id),
+                      parents[0],
+                      await this.copiedVersions(existingNodeId!, parents)
+                  )
+                : parents.map((head) => head.id);
             const version = new FileVersion({
                 id: copyId ?? createId("version"),
                 nodeId,
-                parentVersionIds: copyId
-                    ? copyParentIds(
-                          currentHeads.map((head) => head.id),
-                          currentHeads[0],
-                          await this.copiedVersions(
-                              existingNodeId!,
-                              currentHeads
-                          )
-                      )
-                    : currentHeads.map((head) => head.id),
+                parentVersionIds,
                 causalDepth: copyId
-                    ? currentHeads[0].causalDepth
-                    : maxDepth(currentHeads),
+                    ? parents[0].causalDepth
+                    : maxDepth(parents),
                 contentHash,
                 size: BigInt(bytes.byteLength),
                 ...inheritMeta(
-                    currentHeads,
+                    parents,
                     contentHash,
                     metadata.timestamp,
                     {},
@@ -8642,8 +8690,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     })
                 );
             }
-            // A batch version supersedes every head captured above; there is
-            // no explicit-base override that could leave an old head here.
+            // A batch version supersedes the heads captured above (past a
+            // head flood, the best-ranked); there is no explicit-base
+            // override that could leave it below an old head.
             results[i] = this.versionInfo(version, entry.path, [version]);
         }
 
@@ -8962,8 +9011,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             uniqueIds.map((id, index) => [id, fetched[index]])
         );
         const chunks = chunkIds.map((id) => byId.get(id)!);
-        // Allocate no more than the row claims: a short chunk list can
-        // repeat a large chunk.
+        // A short chunk list can repeat a large chunk: check the size, then
+        // hash chunk by chunk, and allocate the whole only for a match.
         let total = 0;
         for (const chunk of chunks) total += chunk.byteLength;
         if (BigInt(total) !== version.size) {
@@ -8972,14 +9021,15 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 `File size mismatch for ${normalizedPath}`
             );
         }
-        const bytes = chunks.length === 0 ? new Uint8Array(0) : concat(chunks);
-        if (sha256Base64Sync(bytes) !== version.contentHash) {
+        const hash = createSHA256();
+        for (const chunk of chunks) hash.update(chunk);
+        if (toBase64(hash.digest()) !== version.contentHash) {
             throw new SharedFsError(
                 "EIO",
                 `File hash mismatch for ${normalizedPath}`
             );
         }
-        return bytes;
+        return chunks.length === 0 ? new Uint8Array(0) : concat(chunks);
     }
 
     async readFile(path: string) {
@@ -9501,16 +9551,18 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     /**
-     * A new version of `source`'s bytes over `parents`, reusing its chunk
-     * list: shared by setMetadata, resolveConflict and naming restore. The
-     * mtime defaults to the write time.
+     * A new version of `source`'s bytes over `parents` (best-ranked first;
+     * see supersededHeads), reusing its chunk list: shared by setMetadata,
+     * resolveConflict and naming restore. The mtime defaults to the write
+     * time.
      */
     private copyVersion(
         source: FileVersion,
-        parents: VersionLike[],
+        heads: VersionLike[],
         meta: { mode: number; mtime?: bigint },
         conflictResolution: boolean
     ) {
+        const parents = supersededHeads(heads);
         const metadata = this.signedMetadata();
         return new FileVersion({
             id: createId("version"),
@@ -9709,7 +9761,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 );
             }
             const fencedNode = fenced as ResolvedNodePath;
-            if (fencedNode.state.heads.length > 8000) {
+            if (fencedNode.state.heads.length > MAX_CAUSAL_PARENTS) {
                 throw new SharedFsError(
                     "EINVAL",
                     "too many concurrent naming heads to supersede in one event"
@@ -9724,6 +9776,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     `Directory is not empty: ${path}`
                 );
             }
+            this.assertStoredName(fencedNode.winner.name);
             const metadata = this.signedMetadata();
             const event = new NamingEvent({
                 id: createId("naming"),
@@ -10038,8 +10091,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             | ResolvedNodePath
             | undefined;
         if (
-            currentSourceNode.state.heads.length > 8000 ||
-            (currentDestinationNode?.state.heads.length ?? 0) > 8000
+            currentSourceNode.state.heads.length > MAX_CAUSAL_PARENTS ||
+            (currentDestinationNode?.state.heads.length ?? 0) >
+                MAX_CAUSAL_PARENTS
         ) {
             throw new SharedFsError(
                 "EINVAL",
@@ -10211,8 +10265,8 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             );
         }
         if (
-            resolved.state.heads.length > 8000 ||
-            (destination?.state.heads.length ?? 0) > 8000
+            resolved.state.heads.length > MAX_CAUSAL_PARENTS ||
+            (destination?.state.heads.length ?? 0) > MAX_CAUSAL_PARENTS
         ) {
             throw new SharedFsError(
                 "EINVAL",
@@ -10997,6 +11051,9 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                 "EAGAIN",
                 "merge-directory lost its local namespace fence before planning; inspect conflicts and retry"
             );
+        }
+        for (const state of [...fencedChildren.live, fenced.source]) {
+            this.assertStoredName(state.winner.name);
         }
 
         const metadata = this.signedMetadata();
