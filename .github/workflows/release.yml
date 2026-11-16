@@ -63,11 +63,12 @@ jobs:
                   # trusted publisher on npmjs.com names this repository and
                   # release.yml, has no environment, and allows npm publish.
                   # While the NPM_TOKEN secret is set, every command in this
-                  # step can read it. npm sends it with every registry
-                  # request, and publishes with it without a warning when the
-                  # OIDC exchange fails. Once a release has published through
-                  # trusted publishing, delete the secret and revoke the token
-                  # on npmjs.com; both variables are then empty.
+                  # step can read it. npm sends it with the step's other
+                  # registry requests, such as npm view, and publishes with
+                  # it without a warning when the OIDC exchange fails. Once a
+                  # release has published through trusted publishing, delete
+                  # the secret; both variables are then empty. If nothing
+                  # else uses the token, revoke it on npmjs.com.
                   NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
                   NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
                   NPM_CONFIG_PROVENANCE: true
