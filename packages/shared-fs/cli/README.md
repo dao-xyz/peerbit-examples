@@ -480,7 +480,8 @@ peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared" \
   --peer /ip4/192.0.2.10/tcp/4002/p2p/<hub peer id>
 ```
 
-`mount` starts while they are down: it warns, naming the address, and goes
+`mount` starts while they are down: it warns, naming each `--peer` it could
+not dial, or the `--bootstrap` list when none of its nodes answers, and goes
 on. A remount from a writable state directory is writable at once (unless
 `--require-fresh`); a first mount still needs a peer that holds the filesystem
 to answer within about 30 s, or fails naming what it could not reach.
@@ -510,8 +511,9 @@ A `--peer` with `/p2p/<id>` accepts only that identity, so the hub must keep
 its state directory to be redialled: one that returns with a new identity is
 refused on every redial, silently. Without `/p2p/`, any peer at that address
 is accepted, which authenticates the hub less. A connection that dies without
-closing, as across a laptop's sleep, counts as connected until the operating
-system closes it.
+closing, as across a laptop's sleep, counts as connected until Peerbit or
+libp2p drops it: with a hung hub, that took about 12 s while the mount wrote
+and about 2 minutes while it was idle.
 
 Other commands fail at once, naming the address, when a `--peer` cannot be
 dialled or no `--bootstrap` node answers. The options apply to `mount`,
