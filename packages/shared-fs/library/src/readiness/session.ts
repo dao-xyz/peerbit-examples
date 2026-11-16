@@ -414,6 +414,13 @@ export interface SessionTrustPort {
      * clause.
      */
     scopesContained(): boolean;
+    /**
+     * J's trust set's epoch at its last removal (a delete, a replace, a
+     * reseed); 0 before any. A trust run's match at a `seq` below it no
+     * longer shows that J holds R's trust view: the row J lost may be one
+     * R's view holds (design 4.8).
+     */
+    removedAt(): number;
 }
 
 export interface SessionPorts {
@@ -993,6 +1000,12 @@ export class JoinerSession {
 
     state(scope: ScopeId): SessionState | undefined {
         return this.runs.find((run) => run.id === scope)?.state;
+    }
+
+    /** `scope`'s result once its run is contained (the outcome carries it). */
+    resultOf(scope: ScopeId): SessionResult | undefined {
+        const run = this.runs.find((candidate) => candidate.id === scope);
+        return run?.state === "contained" ? run.result : undefined;
     }
 
     /**
@@ -2220,10 +2233,11 @@ export class JoinerSession {
      * The promotion clause (2.4): whether a `trust` hash of `run` that no
      * trusted signer could reverse may be explained now. The namespace run:
      * every trust scope that counts is contained (`scopesContained()`, R's
-     * own included, and this session's trust run), design 4.5 step 8 and
-     * G3-1. The trust run: a run-local fixpoint, no other hash of it
-     * moving, so J's graph holds every row of R's trust snapshot that it
-     * accepts (G3-2; a cross-peer clause would deadlock).
+     * own included, and this session's trust run, at a `seq` no removal
+     * from J's trust set followed), design 4.5 step 8 and G3-1. The trust
+     * run: a run-local fixpoint, no other hash of it moving, so J's graph
+     * holds every row of R's trust snapshot that it accepts (G3-2; a
+     * cross-peer clause would deadlock).
      */
     private promotable(run: ScopeRun, trust: SessionTrustPort): boolean {
         if (
@@ -2239,6 +2253,7 @@ export class JoinerSession {
         );
         if (own && own.state !== "contained") return false;
         try {
+            if (own && own.result!.seq < trust.removedAt()) return false;
             return trust.scopesContained() === true;
         } catch {
             return false;
@@ -2247,7 +2262,8 @@ export class JoinerSession {
 
     /**
      * The trust pass of `run` (2.4, 2.6), coalesced: one in flight per run,
-     * and a request meanwhile runs it once more. It reads J's trust graph,
+     * and a request meanwhile runs it once more, one that lands after the
+     * pass's last check and before its end too. It reads J's trust graph,
      * never a timer; a parked verdict, `reclassify`, the certificate, the
      * trust run's fixpoint and its containment ask for it. Its end certifies
      * again when the certificate waited for it (2.7).
@@ -2264,7 +2280,14 @@ export class JoinerSession {
             .catch((error) => this.internal(error))
             .finally(() => {
                 run.trustChecking = false;
-                if (this.ended || run.state !== "certifying") return;
+                if (this.ended) return;
+                if (run.trustAgain) {
+                    // Asked once the pass had returned, its end still to
+                    // run: once more, and that pass's end certifies.
+                    run.trustAgain = false;
+                    return this.guard(() => this.trustPass(run));
+                }
+                if (run.state !== "certifying") return;
                 this.guard(() => this.certify(run));
             });
     }
@@ -2609,6 +2632,18 @@ export class JoinerSession {
                     // counted in E back to D, so E now may hold none: what C2
                     // counted decides. Again from the top: the row is pulled,
                     // or E checked at this epoch, before another certificate.
+                    continue;
+                }
+                if (
+                    trust &&
+                    run.id === SCOPE_TRUST_V1 &&
+                    certificate.seq < trust.removedAt()
+                ) {
+                    // J's trust set lost a row since C2 (a CUT, or a delete
+                    // applied by id over a re-grant): R's trust view may hold
+                    // it, so the match no longer shows that J holds R's
+                    // view, which the promotion clause reads it as. Again
+                    // from the top, against J's set now.
                     continue;
                 }
                 return this.contain(

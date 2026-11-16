@@ -4535,6 +4535,40 @@ describe("readiness coordinator: scripted sessions", () => {
     });
 });
 
+/**
+ * A scripted session with a trust run of its own once `containTrust`
+ * reports it contained with a result (`state`, `resultOf` and the state
+ * event, as `JoinerSession` gives them). Until then it is a plain
+ * `ScriptedSession`, which shows no trust run. A real session never
+ * contains its trust run at a `seq` below the last removal from J's trust
+ * set (C3 reads `removedAt`); a scripted one reports any `seq`, so the
+ * coordinator's own checks of a live trust run can be reached.
+ */
+class TrustScriptedSession extends ScriptedSession {
+    trustState?: SessionState;
+    trustResult?: SessionResult;
+
+    state(scope: ScopeId) {
+        return scope === TRUST ? this.trustState : super.state(scope);
+    }
+
+    resultOf(scope: ScopeId) {
+        return scope === TRUST && this.trustState === "contained"
+            ? this.trustResult
+            : undefined;
+    }
+
+    containTrust(result: SessionResult) {
+        this.trustResult = result;
+        this.trustState = "contained";
+        this.ports.events.onState?.(
+            this as unknown as JoinerSession,
+            TRUST,
+            "contained"
+        );
+    }
+}
+
 describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
     const keyOf = async () => (await Ed25519Keypair.create()).publicKey;
 
@@ -5484,6 +5518,147 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
         );
     });
 
+    it("a removal from J's trust set while a donor that left after its header keeps its session: the session's trust run is stale, so the session goes and the gap is unknown; back, the donor is asked again on both scopes and J is satisfied with nothing armed, with or without a trust change event", async () => {
+        for (const event of [true, false]) {
+            const { w, peers } = await aclWorldWith([["B"]]);
+            const [b] = peers;
+            refusedRow(w, b, await keyOf());
+            // J holds one trust row of its own; `cut` removes it.
+            const [own] = w.rows([w.j], 1, "tj", 1000, TRUST);
+            const cut: Entry = {
+                head: headOf(`cut:${own.head}`),
+                scope: TRUST,
+                kind: "cut",
+                id: own.id,
+                modified: own.modified + 1n,
+                next: [own.head],
+            };
+            w.blocks.set(cut.head, cut);
+            await w.start();
+            // B's namespace pull waits at J's join until `land`.
+            let land!: () => void;
+            w.scopeGates.set(
+                NS,
+                new Promise<void>((resolve) => (land = resolve))
+            );
+            const checks: Array<() => void> = [];
+            const wake = () => {
+                for (const check of checks.splice(0)) check();
+            };
+            const coordinator = w.run({
+                onEvaluate: (evaluation) => {
+                    w.evaluations.push(evaluation);
+                    wake();
+                },
+                createSession: (init, ports) => {
+                    const session = w.session(init, ports);
+                    wake();
+                    return session;
+                },
+            });
+            /** Reads `done` again on each evaluation and session made. */
+            const after = (done: () => boolean) =>
+                new Promise<void>((resolve) => {
+                    const check = () => {
+                        if (done()) resolve();
+                        else checks.push(check);
+                    };
+                    check();
+                });
+            /** A wait condition: an evaluation from now on. */
+            const evaluated = () => {
+                const from = w.evaluations.length;
+                return () => w.evaluations.length > from;
+            };
+            await after(() => {
+                const session = coordinator.record(b.hash)?.session;
+                return (
+                    session?.state(TRUST) === "contained" &&
+                    session.state(NS) === "draining"
+                );
+            });
+            const record = w.record(b);
+            const first = record.session!;
+            const certified = first.resultOf(TRUST)!.seq;
+
+            // B leaves after its header: `left`, its session kept (D4).
+            w.transport.reachable.set(b.hash, false);
+            w.transport.emit({
+                kind: "reachability",
+                source: "disconnect",
+                peer: b.hash,
+            });
+            expect(record.state).toBe("left");
+            expect(record.session).toBe(first);
+            expect(record.gap).toEqual({ missing: 1 });
+
+            // The removal, while B is away.
+            const trustSet = w.j.scope(TRUST);
+            const removal = trustSet.tap.epoch + 1;
+            const removed = evaluated();
+            trustSet.receive(cut);
+            expect(trustSet.tap.epoch).toBe(removal);
+            expect(certified).toBeLessThan(removal);
+            expect(coordinator.debug().trustRemovedAt).toBe(removal);
+            if (event) {
+                // The host's trust listener runs in the same dispatch.
+                coordinator.trustChanged();
+            } else {
+                // None follows: the sink's own microtask asks again.
+                await after(removed);
+            }
+            // Resumed on its return, the session could never explain B's
+            // row against that trust run, and nothing would ask B again.
+            expect(first.outcome).toEqual({ kind: "closed" });
+            expect(record.session).toBeUndefined();
+            expect(record.state).toBe("left");
+            // What it explained by trust says nothing about J now.
+            expect(record.gap).toEqual({ missing: "unknown" });
+            expect(w.status().gaps).toEqual([
+                { peer: b.hash, missing: "unknown" },
+            ]);
+            expect(coordinator.debug().staleTrust).toBe(1);
+
+            // B is back: a fresh chain on both scopes.
+            const back = evaluated();
+            w.transport.reachable.set(b.hash, true);
+            w.transport.emit({
+                kind: "reachability",
+                source: "connect",
+                peer: b.hash,
+            });
+            await after(back);
+            expect(record.sessionsOpened).toBe(2);
+            const second = record.session!;
+            expect(second.init.scopes).toEqual([NS, TRUST]);
+            expect(second.init.ladder.renewals).toBe(0);
+            expect(record.gap).toBeUndefined();
+            expect(coordinator.satisfied()).toBe(false);
+
+            // The pull lands: the row waits for the new trust run, which
+            // certifies after the removal, and is explained against it.
+            const from = w.evaluations.length;
+            land();
+            await after(() =>
+                w.evaluations.slice(from).some((e) => e.satisfied)
+            );
+            expect(coordinator.satisfied()).toBe(true);
+            expect(record.state).toBe("contained");
+            expect(record.sessionsOpened).toBe(2);
+            expect(record.results.get(TRUST)!.seq).toBeGreaterThanOrEqual(
+                removal
+            );
+            expect(record.results.get(NS)?.explainedBy).toEqual({
+                "rejected-untrusted": 1,
+            });
+            expect(coordinator.debug()).toMatchObject({
+                armedTimers: 0,
+                staleTrust: 1,
+            });
+            expect(w.clock.armed()).toBe(0);
+        }
+    });
+
     describe("scripted sessions", () => {
         /** An ACL world whose sessions are `ScriptedSession`s. */
         const scriptedAcl = async (peers: Array<[string, PeerOptions?]>) => {
@@ -5599,6 +5774,491 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
             expect(w.record(n).key).toBeUndefined();
             expect(coordinator.satisfied()).toBe(false);
             expect(w.status().state).toBe("no-qualified-donor");
+        });
+
+        /**
+         * A scripted ACL world for `purpose` whose J holds one trust row of
+         * its own, every tap seeded: `removeRow` CUTs it, a removal from J's
+         * trust set that J's trust tap applies at once. Its sessions are
+         * `TrustScriptedSession`s. `after(done)` reads `done` again on the
+         * coordinator's own calls (a session made, an evaluation), never by
+         * polling. `sinks()` counts the sinks on J's trust tap added since
+         * the coordinator started and not removed since.
+         */
+        const scriptedRemoval = async (
+            purpose: "join" | "freshness" = "join"
+        ) => {
+            const { w, peers } = await aclWorldWith([["R"]], 0);
+            const [row] = w.rows([w.j], 1, "tj", 1000, TRUST);
+            const cut: Entry = {
+                head: headOf(`cut:${row.head}`),
+                scope: TRUST,
+                kind: "cut",
+                id: row.id,
+                modified: row.modified + 1n,
+                next: [row.head],
+            };
+            w.blocks.set(cut.head, cut);
+            await w.start();
+            const trustSet = w.j.scope(TRUST);
+            const attached = new Set<object>();
+            const addSink = trustSet.tap.addSink.bind(trustSet.tap);
+            trustSet.tap.addSink = (sink) => {
+                const remove = addSink(sink);
+                attached.add(sink);
+                return () => {
+                    attached.delete(sink);
+                    remove();
+                };
+            };
+            const made: TrustScriptedSession[] = [];
+            const checks: Array<() => void> = [];
+            const wake = () => {
+                for (const check of checks.splice(0)) check();
+            };
+            const coordinator = w.run({
+                purpose,
+                onEvaluate: (evaluation) => {
+                    w.evaluations.push(evaluation);
+                    wake();
+                },
+                createSession: (init, ports) => {
+                    const session = new TrustScriptedSession(init, ports);
+                    made.push(session);
+                    wake();
+                    return session as unknown as JoinerSession;
+                },
+            });
+            const after = (done: () => boolean) =>
+                new Promise<void>((resolve) => {
+                    const check = () => {
+                        if (done()) resolve();
+                        else checks.push(check);
+                    };
+                    check();
+                });
+            await after(() => made.length === 1);
+            return {
+                w,
+                r: peers[0],
+                coordinator,
+                made,
+                after,
+                sinks: () => attached.size,
+                /** J's trust tap's epoch: the `seq` of a certificate now. */
+                epoch: () => trustSet.tap.epoch,
+                removeRow: () => trustSet.receive(cut),
+                /** A wait condition: an evaluation from now on held. */
+                nextHeld: () => {
+                    const from = w.evaluations.length;
+                    return () =>
+                        w.evaluations.slice(from).some((e) => e.satisfied);
+                },
+            };
+        };
+
+        /** Both scopes' results of `session`, the trust one certified at `seq`. */
+        const bothAt = (session: ScriptedSession, seq: number) => [
+            session.result(true),
+            { ...session.result(true, "creator", TRUST), seq },
+        ];
+
+        it("a removal from J's trust set after a contained trust result: the result is stale, the predicate gates at once, and R is asked again on both scopes, with or without a trust change event, for a join and a freshness check", async () => {
+            for (const purpose of ["join", "freshness"] as const) {
+                for (const event of [true, false]) {
+                    const {
+                        w,
+                        r,
+                        coordinator,
+                        made,
+                        after,
+                        epoch,
+                        removeRow,
+                        nextHeld,
+                    } = await scriptedRemoval(purpose);
+                    const [first] = made;
+                    const held = nextHeld();
+                    first.finish({
+                        kind: "contained",
+                        results: bothAt(first, epoch()),
+                    });
+                    await after(held);
+                    expect(coordinator.satisfied()).toBe(true);
+                    const record = w.record(r);
+                    expect(record.sessionsOpened).toBe(1);
+                    const removal = epoch() + 1;
+                    removeRow();
+                    expect(epoch()).toBe(removal);
+                    // The tap's sink took the removal in its dispatch: the
+                    // trust result, certified before it, counts no longer.
+                    expect(coordinator.satisfied()).toBe(false);
+                    expect(coordinator.debug().trustRemovedAt).toBe(removal);
+                    if (event) {
+                        // The host's trust listener runs in the same dispatch.
+                        coordinator.trustChanged();
+                    } else {
+                        // None follows (a replace verify's repair): the
+                        // sink's own microtask asks again.
+                        await after(() => made.length === 2);
+                    }
+                    expect(made).toHaveLength(2);
+                    expect(made[1].init.scopes).toEqual([NS, TRUST]);
+                    expect(record.state).toBe("asking");
+                    expect(record.sessionsOpened).toBe(2);
+                    expect(record.results.size).toBe(0);
+                    expect(coordinator.debug().staleTrust).toBe(1);
+                    expect(coordinator.satisfied()).toBe(false);
+                    // A trust result certified after the removal counts.
+                    const again = nextHeld();
+                    made[1].finish({
+                        kind: "contained",
+                        results: bothAt(made[1], epoch()),
+                    });
+                    await after(again);
+                    expect(coordinator.satisfied()).toBe(true);
+                    expect(coordinator.debug().staleTrust).toBe(1);
+                }
+            }
+        });
+
+        it("a trust certificate made before a removal from J's trust set whose contained outcome arrives after it: never counted, and R is asked again on both scopes", async () => {
+            const {
+                w,
+                r,
+                coordinator,
+                made,
+                after,
+                epoch,
+                removeRow,
+                nextHeld,
+            } = await scriptedRemoval();
+            const [first] = made;
+            const certified = epoch();
+            removeRow();
+            coordinator.trustChanged();
+            // A scripted session shows no trust run of its own: nothing is
+            // stale before its outcome.
+            expect(made).toHaveLength(1);
+            const evaluated = w.evaluations.length;
+            first.finish({
+                kind: "contained",
+                results: bothAt(first, certified),
+            });
+            // Merged, found stale and reopened in the outcome's own handler.
+            const record = w.record(r);
+            expect(record.state).toBe("asking");
+            expect(record.results.size).toBe(0);
+            expect(record.sessionsOpened).toBe(2);
+            expect(made).toHaveLength(2);
+            expect(made[1].init.scopes).toEqual([NS, TRUST]);
+            expect(coordinator.satisfied()).toBe(false);
+            expect(coordinator.debug().staleTrust).toBe(1);
+            await after(() => w.evaluations.length > evaluated);
+            expect(
+                w.evaluations.slice(evaluated).some((e) => e.satisfied)
+            ).toBe(false);
+            const held = nextHeld();
+            made[1].finish({
+                kind: "contained",
+                results: bothAt(made[1], epoch()),
+            });
+            await after(held);
+            expect(coordinator.satisfied()).toBe(true);
+            expect(record.results.get(TRUST)!.seq).toBe(certified + 1);
+        });
+
+        it("a renewal that carries a trust result certified before a removal from J's trust set: a fresh chain on both scopes, never the next rung with the stale result", async () => {
+            const {
+                w,
+                r,
+                coordinator,
+                made,
+                after,
+                epoch,
+                removeRow,
+                nextHeld,
+            } = await scriptedRemoval();
+            const [first] = made;
+            const certified = epoch();
+            removeRow();
+            first.finish({
+                kind: "renew",
+                reason: "fetch-failed",
+                list: false,
+                scopes: [NS],
+                results: [
+                    { ...first.result(true, "creator", TRUST), seq: certified },
+                ],
+            });
+            const record = w.record(r);
+            expect(record.results.size).toBe(0);
+            expect(made).toHaveLength(2);
+            expect(made[1].init.scopes).toEqual([NS, TRUST]);
+            expect(made[1].init.ladder.renewals).toBe(0);
+            expect(coordinator.debug().staleTrust).toBe(1);
+            const held = nextHeld();
+            made[1].finish({
+                kind: "contained",
+                results: bothAt(made[1], epoch()),
+            });
+            await after(held);
+            expect(coordinator.satisfied()).toBe(true);
+        });
+
+        it("a removal from J's trust set: the promotion clause the sessions read stops counting the stale trust result in the tap's dispatch, before R is asked again, and counts R's new one", async () => {
+            const { coordinator, made, after, epoch, removeRow, nextHeld } =
+                await scriptedRemoval();
+            const [first] = made;
+            const held = nextHeld();
+            first.finish({
+                kind: "contained",
+                results: bothAt(first, epoch()),
+            });
+            await after(held);
+            // J's trust view as every session reads it.
+            const port = first.ports.trust!;
+            expect(port.removedAt()).toBe(0);
+            expect(port.scopesContained()).toBe(true);
+            const removal = epoch() + 1;
+            removeRow();
+            // In the tap's dispatch: no trust change event, and the sink's
+            // microtask has not asked R again yet.
+            expect(made).toHaveLength(1);
+            expect(port.removedAt()).toBe(removal);
+            expect(port.scopesContained()).toBe(false);
+            await after(() => made.length === 2);
+            expect(port.scopesContained()).toBe(false);
+            const again = nextHeld();
+            made[1].finish({
+                kind: "contained",
+                results: bothAt(made[1], epoch()),
+            });
+            await after(again);
+            expect(port.removedAt()).toBe(removal);
+            expect(port.scopesContained()).toBe(true);
+        });
+
+        it("a removal from J's trust set while a contained donor is away: its results go and it leaves with an unknown gap, whatever its stale result explained by trust; back, it is asked again on both scopes, with or without a trust change event", async () => {
+            for (const event of [true, false]) {
+                const {
+                    w,
+                    r,
+                    coordinator,
+                    made,
+                    after,
+                    epoch,
+                    removeRow,
+                    nextHeld,
+                } = await scriptedRemoval();
+                const [first] = made;
+                const held = nextHeld();
+                first.finish({
+                    kind: "contained",
+                    results: bothAt(first, epoch()),
+                });
+                await after(held);
+                w.transport.reachable.set(r.hash, false);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "disconnect",
+                    peer: r.hash,
+                });
+                const record = w.record(r);
+                expect(record.state).toBe("contained");
+                expect(record.departed).toBe(true);
+                const evaluated = w.evaluations.length;
+                removeRow();
+                if (event) {
+                    coordinator.trustChanged();
+                } else {
+                    await after(() => w.evaluations.length > evaluated);
+                }
+                expect(record.state).toBe("left");
+                expect(record.results.size).toBe(0);
+                expect(record.gap).toEqual({ missing: "unknown" });
+                expect(w.status().gaps).toEqual([
+                    { peer: r.hash, missing: "unknown" },
+                ]);
+                expect(coordinator.proof().gaps).toEqual([
+                    { peer: r.hash, missing: "unknown" },
+                ]);
+                expect(coordinator.debug().staleTrust).toBe(1);
+                expect(made).toHaveLength(1);
+                w.transport.reachable.set(r.hash, true);
+                w.transport.emit({
+                    kind: "reachability",
+                    source: "connect",
+                    peer: r.hash,
+                });
+                expect(made).toHaveLength(2);
+                expect(made[1].init.scopes).toEqual([NS, TRUST]);
+                expect(record.state).toBe("asking");
+                expect(record.gap).toBeUndefined();
+                const again = nextHeld();
+                made[1].finish({
+                    kind: "contained",
+                    results: bothAt(made[1], epoch()),
+                });
+                await after(again);
+                expect(coordinator.satisfied()).toBe(true);
+                expect(coordinator.debug().staleTrust).toBe(1);
+            }
+        });
+
+        it("a finished or disposed coordinator leaves no sink on J's trust tap: a removal from J's trust set after its end changes nothing it holds", async () => {
+            for (const end of ["finish", "dispose"] as const) {
+                const { coordinator, made, sinks, removeRow } =
+                    await scriptedRemoval();
+                // Its sink on J's trust set: a scripted session adds none.
+                expect(sinks()).toBe(1);
+                coordinator[end]();
+                expect(sinks()).toBe(0);
+                removeRow();
+                await settle();
+                expect(coordinator.debug()).toMatchObject({
+                    trustRemovedAt: 0,
+                    staleTrust: 0,
+                });
+                expect(made).toHaveLength(1);
+            }
+        });
+
+        it("a live session's trust run that reports contained at a seq a removal from J's trust set followed: R is asked again on both scopes from that report", async () => {
+            const { w, r, coordinator, made, epoch, removeRow } =
+                await scriptedRemoval();
+            const [first] = made;
+            const certified = epoch();
+            removeRow();
+            // No trust run of R's session is contained yet: the removal's
+            // own microtask finds nothing to ask again.
+            await settle();
+            expect(coordinator.debug()).toMatchObject({
+                trustRemovedAt: certified + 1,
+                staleTrust: 0,
+            });
+            expect(made).toHaveLength(1);
+            // A certificate made before the removal (a real session's C3
+            // never contains one; the coordinator checks the report).
+            first.containTrust({
+                ...first.result(true, "creator", TRUST),
+                seq: certified,
+            });
+            await settle();
+            expect(first.outcome).toEqual({ kind: "closed" });
+            expect(made).toHaveLength(2);
+            expect(made[1].init.scopes).toEqual([NS, TRUST]);
+            expect(w.record(r)).toMatchObject({
+                state: "asking",
+                sessionsOpened: 2,
+            });
+            expect(coordinator.debug().staleTrust).toBe(1);
+        });
+
+        it("a reseed of J's trust set counts as a removal: a trust result certified before it is stale, and R is asked again on both scopes", async () => {
+            const { w, r, coordinator, made, after, epoch, nextHeld } =
+                await scriptedRemoval();
+            const [first] = made;
+            const held = nextHeld();
+            first.finish({
+                kind: "contained",
+                results: bothAt(first, epoch()),
+            });
+            await after(held);
+            // J's trust set grows after the certificate: nothing removed.
+            w.rows([w.j], 1, "tk", 2000, TRUST);
+            expect(coordinator.debug().trustRemovedAt).toBe(0);
+            expect(coordinator.satisfied()).toBe(true);
+            // The tap reseeds only while its count is unverified, so before
+            // any certificate (C1); driven here, the sink's reset: the
+            // rebuilt set may lack rows the certificate counted.
+            const reset = epoch();
+            await w.j.scope(TRUST).tap.reseed();
+            await settle();
+            expect(coordinator.debug()).toMatchObject({
+                trustRemovedAt: reset,
+                staleTrust: 1,
+            });
+            expect(made).toHaveLength(2);
+            expect(made[1].init.scopes).toEqual([NS, TRUST]);
+            const record = w.record(r);
+            expect(record.state).toBe("asking");
+            expect(record.results.size).toBe(0);
+            expect(coordinator.satisfied()).toBe(false);
+        });
+
+        it("a qualification session whose trust run contained before a removal from J's trust set, while R's record holds trust results that still count: the session goes and R is qualified again with a fresh one", async () => {
+            const {
+                w,
+                r,
+                coordinator,
+                made,
+                after,
+                epoch,
+                removeRow,
+                nextHeld,
+            } = await scriptedRemoval();
+            const [first] = made;
+            const removal = epoch() + 1;
+            // R contained, not qualified, its trust result certified at the
+            // removal (a scripted session reports any seq: a real
+            // qualification's trust run never certifies before the record's,
+            // so the branch guards that order).
+            first.finish({
+                kind: "contained",
+                results: [
+                    first.result(false),
+                    { ...first.result(false, "creator", TRUST), seq: removal },
+                ],
+            });
+            const record = w.record(r);
+            expect(record).toMatchObject({
+                state: "contained",
+                qualified: false,
+            });
+            // R turned ready: a qualification session, whose trust run
+            // contains before the removal.
+            w.fromPeer(
+                r,
+                w.notice(r, {
+                    provenance: RECONCILED,
+                    openNonce: first.result(false).openNonce,
+                })
+            );
+            await after(() => made.length === 2);
+            const qualification = made[1];
+            expect(record.qualifying).toBe(true);
+            qualification.containTrust({
+                ...qualification.result(true, "creator", TRUST),
+                seq: epoch(),
+            });
+            await settle();
+            expect(made).toHaveLength(2);
+            expect(coordinator.debug().staleTrust).toBe(0);
+            removeRow();
+            expect(epoch()).toBe(removal);
+            await settle();
+            expect(qualification.outcome).toEqual({ kind: "closed" });
+            expect(made).toHaveLength(3);
+            expect(made[2].init.scopes).toEqual([NS, TRUST]);
+            expect(record).toMatchObject({
+                state: "contained",
+                qualified: false,
+                qualifying: true,
+            });
+            expect(record.results.get(TRUST)!.seq).toBe(removal);
+            expect(coordinator.debug().staleTrust).toBe(1);
+            // The fresh one, contained after the removal, qualifies R.
+            const qualified = nextHeld();
+            made[2].finish({
+                kind: "contained",
+                results: bothAt(made[2], epoch()),
+            });
+            await after(qualified);
+            expect(record).toMatchObject({
+                qualified: true,
+                qualifying: false,
+            });
+            expect(coordinator.satisfied()).toBe(true);
         });
     });
 });

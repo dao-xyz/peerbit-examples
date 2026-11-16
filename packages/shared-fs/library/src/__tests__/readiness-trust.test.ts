@@ -22,6 +22,7 @@ import {
     Coordinator,
     SESSIONS_IN_FLIGHT,
     describeReadiness,
+    type ReadinessStatus,
 } from "../readiness/coordinator.js";
 import { headDigest } from "../readiness/digest.js";
 import { validateProof, type Proof } from "../readiness/proof.js";
@@ -33,7 +34,11 @@ import {
     TRUST_V1,
     type ScopeId,
 } from "../readiness/scopes.js";
-import { JoinerSession, type SessionResult } from "../readiness/session.js";
+import {
+    JoinerSession,
+    type SessionResult,
+    type SessionState,
+} from "../readiness/session.js";
 import { documentsIndexPort } from "../readiness/tap.js";
 import { HeaderV1, OpenV1, type ReadinessMessage } from "../readiness/wire.js";
 import { stopTestPeers } from "./stop-test-peers.js";
@@ -42,12 +47,14 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * The joiner's trust-scope design tests on in-process Peerbit peers, real
  * filesystems and access-controlled (ACL) stores (M1 plan 7.3 items 3 and
  * 4, SPEC3 9.6, SPEC4 9.4(2); WRITE_READINESS_V2.md section 8): tests 34,
- * 35, 36 (split as 36a and 36b, G3-17), 37, 42 and 55 (55a and 55b, G3-16,
- * G4-12), design 4.12 #17 end to end, the S8 attach rule, the M1 ACL gap
- * and the M2 trust reclassify of the commit 3 handoff, R's identity turning
- * trusted by a trust change (I1), the scopes an ACL join opens (R1) and its
- * fault without J's trust view (R2); and M2's design test 80: a warm
- * reopen's freshness check holds only once the trust scope is contained too.
+ * 35, 36 (split as 36a and 36b, G3-17; 36c and 36d, an old CUT that removes
+ * the re-grant from J's trust graph after R's trust scope counted it), 37,
+ * 42 and 55 (55a and 55b, G3-16, G4-12), design 4.12 #17 end to end, the S8
+ * attach rule, the M1 ACL gap and the M2 trust reclassify of the commit 3
+ * handoff, R's identity turning trusted by a trust change (I1), the scopes
+ * an ACL join opens (R1) and its fault without J's trust view (R2); and
+ * M2's design test 80: a warm reopen's freshness check holds only once the
+ * trust scope is contained too.
  *
  * Since PR-3 commit 4 the coordinator's predicate decides when a fresh full
  * address-open turns ready, so ready implies containment: the tests read
@@ -65,7 +72,8 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * log id, and undone after each test:
  * - `withholdTrustSync`: J's trust `SharedLog.onMessage` drops exchange
  *   heads (plain, raw and stash-backed), so the readiness pull is the only
- *   way a trust row reaches J. The shared-log `responseHandler` calls
+ *   way a trust row reaches J (36c and 36d drop R1's instead, so R1 never
+ *   gains the re-grant from J). The shared-log `responseHandler` calls
  *   `this.onMessage` late (`@peerbit/shared-log` 16.0.40
  *   `dist/src/index.js:12324`), so a prototype patch installed before J
  *   opens holds sync back from the first message on;
@@ -81,6 +89,11 @@ import { stopTestPeers } from "./stop-test-peers.js";
  * - `holdTrustStart`: a donor's trust `ScopeState.started` becomes a getter
  *   the test holds; the responder reads it inside one freeze, after the
  *   namespace snapshot (`responder.ts` `freezeOnce`);
+ * - `cutStraddlesRegrant` (36c, 36d): J's trust `canPerform` calls the
+ *   `original` of the notes its symbol marks (`ports.ts`
+ *   `installTrustRejectionNotes`), so replacing `original` holds J's
+ *   admission of a trust row; `JoinerSession.prototype.certificateNow`
+ *   can hold a certificate's digest (C2 before the hold, C3 after it);
  * - partitions by a connection gater, as `readiness-join` test 5;
  * - S8: J's runtime first attaches its trust tap to a decoded copy of the
  *   trust store, so the instance `TrustedNetwork.open` returns differs from
@@ -254,6 +267,74 @@ const deferred = () => {
     let resolve!: () => void;
     const promise = new Promise<void>((done) => (resolve = done));
     return { promise, resolve };
+};
+
+/**
+ * Resolves once `assertion` passes on `fs`'s readiness status: at once, or
+ * at a `readiness:progress` event (the coordinator reports each change of a
+ * peer's state or reason, and of its predicate), never by polling.
+ */
+const statusHolds = (
+    fs: SharedFsHandle,
+    assertion: (status: ReadinessStatus) => void
+) =>
+    new Promise<void>((resolve) => {
+        // Untyped: `readiness:progress` is not in ProgramEvents.
+        const events: EventTarget = programOf(fs).events;
+        const check = () => {
+            try {
+                assertion(readinessOf(fs)!);
+            } catch {
+                return;
+            }
+            events.removeEventListener("readiness:progress", check);
+            resolve();
+        };
+        events.addEventListener("readiness:progress", check);
+        check();
+    });
+
+/**
+ * Resolves once `fs`'s trust graph does (`trusted`) or does not trust
+ * `key`: at once, or at a change of its trust store, never by polling.
+ */
+const trustHolds = (fs: SharedFsHandle, key: PublicSignKey, trusted: boolean) =>
+    new Promise<void>((resolve, reject) => {
+        const events: EventTarget = trustStoreOf(fs).events;
+        let done = false;
+        const check = () =>
+            void fs.isTrustedWriter(key).then((now) => {
+                if (done || now !== trusted) return;
+                done = true;
+                events.removeEventListener("change", check);
+                resolve();
+            }, reject);
+        events.addEventListener("change", check);
+        check();
+    });
+
+/**
+ * Conditions the test's hooks check again, never by polling: `when(check)`
+ * resolves at once if `check` holds, else at the first `pulse()` after
+ * which it does.
+ */
+const pulsed = () => {
+    const waiting: Array<{ check: () => boolean; resolve: () => void }> = [];
+    return {
+        pulse: () => {
+            for (const waiter of [...waiting]) {
+                if (!waiter.check()) continue;
+                waiting.splice(waiting.indexOf(waiter), 1);
+                waiter.resolve();
+            }
+        },
+        when: (check: () => boolean) =>
+            check()
+                ? Promise.resolve()
+                : new Promise<void>((resolve) =>
+                      waiting.push({ check, resolve })
+                  ),
+    };
 };
 
 /** The object on `target`'s prototype chain that defines `name`. */
@@ -1317,6 +1398,409 @@ describe("readiness trust scope (in-process)", () => {
             expect(await trustRows(joiner.fs)).toEqual(regranted);
             expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(true);
             await expectFiles(joiner.fs, WRITER_FILES);
+        }, 240_000);
+
+        /**
+         * 36c and 36d (36b's failure on CI): 36b's setup, then the owner's
+         * old CUT D1 of h1 straddles the re-grant h2 at J. IdentityRelation
+         * ids are sha256(to||from), so D1 names h2's id, and
+         * `@peerbit/document` admits a received delete in two awaited steps
+         * and applies it by key (its existence check, then
+         * `TrustedNetwork.canPerform`, which resolves the relation by id,
+         * then `delMany`): a D1 whose admission straddles h2's indexing
+         * deletes h2 from J's index while J's log keeps h2. J's trust set
+         * loses a row of R2's trust view after R2's trust run counted it.
+         *
+         * Forced through J's trust notes, undone after the test: h2's put
+         * waits until D1's delete is being admitted, and joins D1 (a head of
+         * R2's trust log that is no row of it) into J's trust log itself;
+         * D1's admission waits for J's trust change that adds W's edge, then
+         * for `hold`: R2's trust run contained (`"contained"`), or R2's trust
+         * certificate made with h2, whose digest the test then holds until
+         * the removal (`"certificate"`). R1's trust log receives no exchange
+         * heads from before J dials it (`withholdTrustSync`), so R1 never
+         * gains h2 from J by sync and its trust run never waits for h2: J's
+         * gate is R2's stale trust result alone, and the flip check is never
+         * vacuous. Waits, on the test's hooks, for J's flip or for J quiet:
+         * R2's current session's trust run has h2 logged since the removal
+         * (J's log holds it, J's index never will again), each live trust
+         * run is contained or waits only for such rows, and both namespace
+         * runs are parked for trust. Asserts what both orders share and
+         * returns the rest.
+         */
+        const cutStraddlesRegrant = async (
+            hold: "contained" | "certificate"
+        ) => {
+            const owner = await createOwner();
+            const writer = await createWriter(owner);
+            const cut = await partitionablePeer();
+            const holderPeer = await createPeer();
+            await owner.fs.authorizeWriter(keyOf(holderPeer));
+            await writeAsWriter(writer, owner);
+            const writerKey = keyOf(writer.peer);
+            const first = await readyReplica(owner, "trust-r1", cut.peer);
+            const second = await readyReplica(owner, "trust-r2", holderPeer);
+            await expectFiles(first.fs, WRITER_FILES);
+            await expectFiles(second.fs, WRITER_FILES);
+            // D1 revokes h1 at both replicas; R1 is cut off; h2 reaches R2.
+            await owner.fs.revokeWriter(writerKey);
+            await within(
+                Promise.all([
+                    trustHolds(first.fs, writerKey, false),
+                    trustHolds(second.fs, writerKey, false),
+                ]),
+                60_000,
+                "both replicas holding the CUT"
+            );
+            await partition(cut, [owner.peer, writer.peer, holderPeer]);
+            await owner.fs.authorizeWriter(writerKey);
+            await within(
+                trustHolds(second.fs, writerKey, true),
+                60_000,
+                "R2 holding the re-grant"
+            );
+            expect(await first.fs.isTrustedWriter(writerKey)).toBe(false);
+            const regranted = await trustRows(second.fs);
+            const rowHeads = new Set(regranted.values());
+            const cutEntry = (
+                await trustStoreOf(second.fs).log.log.getHeads(true).all()
+            ).find((entry: any) => !rowHeads.has(entry.hash));
+            expect(cutEntry).toBeDefined();
+            await stopPeer(owner.peer);
+            await stopPeer(writer.peer);
+            const firstRows = await namespaceRows(first.fs);
+            const revoked = await rowsSignedBy(first.fs, firstRows, writerKey);
+            expect(revoked.size).toBeGreaterThan(0);
+
+            // R1 never takes J's trust heads: its trust view cannot gain h2.
+            withholdTrustSync(cut.peer, logIdOf(trustStoreOf(first.fs)));
+            // J sees R1 only and is held, R1's rows of W rejected-untrusted.
+            const joiner = await joinOf([first]);
+            const coordinator = coordinatorOf(joiner.fs);
+            const firstHash = hashOf(cut.peer);
+            const secondHash = hashOf(holderPeer);
+            await within(
+                statusHolds(joiner.fs, (status) => {
+                    expect(status).toMatchObject({
+                        state: "no-qualified-donor",
+                        satisfied: false,
+                        required: [],
+                        trustChecking: [],
+                    });
+                    expect(status.contained).toMatchObject([
+                        {
+                            peer: firstHash,
+                            qualified: false,
+                            identity: "untrusted",
+                        },
+                    ]);
+                }),
+                60_000,
+                "J held at no-qualified-donor with R1 contained"
+            );
+            expect(
+                resultOf(joiner.fs, cut.peer)!.explainedBy["rejected-untrusted"]
+            ).toBe(revoked.size);
+            const before = await trustRows(joiner.fs);
+            const regrant = [...regranted].find(([id]) => !before.has(id));
+            expect(regrant).toBeDefined();
+            const [regrantId, regrantHead] = regrant!;
+
+            const { pulse, when } = pulsed();
+            const jTrust = trustStoreOf(joiner.fs);
+            const relatesToWriter = (value: any) =>
+                value?.to?.hashcode?.() === writerKey.hashcode();
+            // J's trust changes: W's edge added (h2), then removed (by D1).
+            const indexed = deferred();
+            const removed = deferred();
+            let trusting = false;
+            let removal = false;
+            const onTrustChange = (event: any) => {
+                if ((event.detail?.added ?? []).some(relatesToWriter)) {
+                    trusting = true;
+                    indexed.resolve();
+                }
+                if ((event.detail?.removed ?? []).some(relatesToWriter)) {
+                    trusting = false;
+                    removal = true;
+                    removed.resolve();
+                }
+                pulse();
+            };
+            jTrust.events.addEventListener("change", onTrustChange);
+            restores.push(() =>
+                jTrust.events.removeEventListener("change", onTrustChange)
+            );
+            // While J trusts W, W's rows wait at J's namespace admission for
+            // the removal, so none is indexed in that window (on CI all of
+            // W's rows were missing). An admission that started before the
+            // edge was added spans the trust change and is refused
+            // (`canPerformEntry`'s fence), so the window has no other way in.
+            const program = programOf(joiner.fs);
+            const canPerformEntry = program.canPerformEntry;
+            program.canPerformEntry = async function (
+                this: unknown,
+                operation: any
+            ) {
+                if (trusting) {
+                    const keys: PublicSignKey[] =
+                        await operation.entry.getPublicKeys();
+                    if (keys.some((key) => key.equals(writerKey))) {
+                        await removed.promise;
+                    }
+                }
+                return canPerformEntry.call(this, operation);
+            };
+            restores.push(() => delete program.canPerformEntry);
+
+            // The hold point: R2's session and its sessions opened then, and
+            // J's trust set's epoch its trust result (or certificate) has;
+            // whether the held certificate matched R2's anchor.
+            const held = deferred();
+            const holding: {
+                session?: JoinerSession;
+                sessions?: number;
+                epoch?: number;
+                matched?: boolean;
+            } = {};
+            const holdAt = (session: JoinerSession, epoch: number) => {
+                holding.session = session;
+                holding.sessions =
+                    coordinator.record(secondHash)!.sessionsOpened;
+                holding.epoch = epoch;
+                held.resolve();
+            };
+            const network = programOf(joiner.fs).trustGraph;
+            const notes =
+                network[
+                    Object.getOwnPropertySymbols(network).find(
+                        (symbol) =>
+                            symbol.description ===
+                            "shared-fs readiness trust notes"
+                    )!
+                ];
+            const original = notes.original;
+            const admitting = deferred();
+            let joined = false;
+            notes.original = async function (this: unknown, properties: any) {
+                if (properties?.type === "delete") {
+                    admitting.resolve();
+                    await indexed.promise;
+                    await held.promise;
+                } else if (
+                    properties?.type === "put" &&
+                    relatesToWriter(properties.value) &&
+                    !joined
+                ) {
+                    joined = true;
+                    // A refused D1 removes nothing, which fails first below.
+                    void jTrust.log.join([cutEntry]).catch(() => {});
+                    await admitting.promise;
+                }
+                return original.call(this, properties);
+            };
+            restores.push(() => {
+                admitting.resolve();
+                indexed.resolve();
+                held.resolve();
+                removed.resolve();
+                notes.original = original;
+            });
+
+            const prototype = JoinerSession.prototype as any;
+            let loggedBy: JoinerSession | undefined;
+            /** Some trust run of R1 found h2 in J's log only. */
+            let firstLogged = false;
+            const setLogged = prototype.setLogged;
+            prototype.setLogged = function (
+                this: JoinerSession,
+                run: any,
+                key: string
+            ) {
+                const head = run.pending.get(key)?.head;
+                const result = setLogged.call(this, run, key);
+                if (run.id === SCOPE_TRUST_V1 && head === regrantHead) {
+                    if (this.peer === firstHash) firstLogged = true;
+                    if (removal && this.peer === secondHash) loggedBy = this;
+                }
+                pulse();
+                return result;
+            };
+            restores.push(() => (prototype.setLogged = setLogged));
+            const dialedAt = runtimeOf(joiner.fs)!.trust!.epoch;
+            if (hold === "certificate") {
+                const certificateNow = prototype.certificateNow;
+                prototype.certificateNow = function (
+                    this: JoinerSession,
+                    run: any
+                ) {
+                    const certificate = certificateNow.call(this, run);
+                    if (
+                        this.peer !== secondHash ||
+                        run.id !== SCOPE_TRUST_V1 ||
+                        certificate.seq <= dialedAt ||
+                        removal ||
+                        holding.session
+                    ) {
+                        return certificate;
+                    }
+                    holdAt(this, certificate.seq);
+                    return {
+                        ...certificate,
+                        digest: removed.promise.then(async () => {
+                            const digest = await certificate.digest;
+                            holding.matched = sameBytes(
+                                digest,
+                                run.header.anchor
+                            );
+                            return digest;
+                        }),
+                    };
+                };
+                restores.push(
+                    () => (prototype.certificateNow = certificateNow)
+                );
+            }
+            // J's coordinator's session events, by name on the instance.
+            const target = coordinator as any;
+            const afterCall = (
+                name: string,
+                then: (...args: any[]) => void
+            ) => {
+                const method = target[name];
+                target[name] = function (this: unknown, ...args: unknown[]) {
+                    const result = method.apply(this, args);
+                    then(...args);
+                    return result;
+                };
+                restores.push(() => delete target[name]);
+            };
+            afterCall(
+                "onSessionState",
+                (
+                    session: JoinerSession,
+                    scope: ScopeId,
+                    state: SessionState
+                ) => {
+                    if (
+                        hold === "contained" &&
+                        session.peer === secondHash &&
+                        scope === SCOPE_TRUST_V1 &&
+                        state === "contained" &&
+                        !removal &&
+                        !holding.session
+                    ) {
+                        holdAt(session, runtimeOf(joiner.fs)!.trust!.epoch);
+                    }
+                    pulse();
+                }
+            );
+            afterCall("onSessionParked", pulse);
+            afterCall("onOutcome", pulse);
+
+            let flip:
+                | { missing: string[]; status: ReadinessStatus }
+                | undefined;
+            void atReady(joiner.fs, () => {
+                flip = {
+                    missing: missingFromTap(joiner.fs, firstRows),
+                    status: readinessOf(joiner.fs)!,
+                };
+                pulse();
+            });
+            /**
+             * Contained, or waiting only for rows J's log holds and its index
+             * lacks (h2: R1's never does, which the end asserts).
+             */
+            const trustQuiet = (session: JoinerSession) => {
+                const run = session.debug().scopes[SCOPE_TRUST_V1];
+                return (
+                    run?.state === "contained" ||
+                    (run?.state === "draining" &&
+                        run.pending > 0 &&
+                        run.pending === run.logged)
+                );
+            };
+            const quiet = () =>
+                removal &&
+                loggedBy !== undefined &&
+                coordinator.record(secondHash)!.session === loggedBy &&
+                [firstHash, secondHash].every((hash) => {
+                    const session = coordinator.record(hash)!.session;
+                    return (
+                        session !== undefined &&
+                        session.parked(SCOPE_NAMESPACE_V1) &&
+                        trustQuiet(session)
+                    );
+                });
+
+            // R2 joins J's view with h2 in its trust snapshot.
+            await joiner.peer.dial(holderPeer);
+            await within(
+                when(() => flip !== undefined || quiet()),
+                120_000,
+                "J's flip, or J quiet after the CUT"
+            );
+            // D1 removed h2 from J's index, and J never turned ready
+            // without W's rows on R2's stale trust result.
+            expect(removal).toBe(true);
+            expect(flip).toBeUndefined();
+            // J is gated with nothing armed: R2's trust run waits for h2 in
+            // J's index, the namespace runs for J's trust graph.
+            expect(runtimeOf(joiner.fs)!.debug().armedTimers).toBe(0);
+            expect(coordinator.satisfied()).toBe(false);
+            expect(readinessOf(joiner.fs)).toMatchObject({ satisfied: false });
+            const record = coordinator.record(secondHash)!;
+            expect(record.state).toBe("reconciling");
+            expect(record.results.size).toBe(0);
+            expect(
+                liveScopeOf(joiner.fs, holderPeer, SCOPE_TRUST_V1)
+            ).toMatchObject({ state: "draining", pending: 1, logged: 1 });
+            // The trust result or certificate R2's run had at the hold
+            // predates the removal.
+            expect(coordinator.debug().trustRemovedAt).toBeGreaterThan(
+                holding.epoch!
+            );
+            // J's log holds h2, its index does not: W stays untrusted.
+            expect((await trustRows(joiner.fs)).has(regrantId)).toBe(false);
+            expect(await jTrust.log.log.has(regrantHead)).toBe(true);
+            expect(await joiner.fs.isTrustedWriter(writerKey)).toBe(false);
+            // R1 never held h2, so no trust run of R1 waited for it, and
+            // R1's trust scope counts (contained since the removal): R2's
+            // alone gates J.
+            expect(firstLogged).toBe(false);
+            expect(await trustStoreOf(first.fs).log.log.has(regrantHead)).toBe(
+                false
+            );
+            const firstTrust = coordinator
+                .record(firstHash)!
+                .session!.resultOf(SCOPE_TRUST_V1);
+            expect(firstTrust?.seq).toBeGreaterThanOrEqual(
+                coordinator.debug().trustRemovedAt
+            );
+            return { coordinator, record, holding, loggedBy: loggedBy! };
+        };
+
+        it("36c: a CUT that straddles the re-grant of the same edge removes it from J's trust graph after R2's trust scope was contained: J does not turn ready on the stale trust result; R2 is asked again and J stays gated", async () => {
+            const { coordinator, record, holding, loggedBy } =
+                await cutStraddlesRegrant("contained");
+            // R2's trust result went stale with its session in flight: R2 was
+            // asked again, and the new session's trust run holds h2 logged.
+            expect(record.sessionsOpened).toBeGreaterThan(holding.sessions!);
+            expect(loggedBy).not.toBe(holding.session);
+            expect(coordinator.debug().staleTrust).toBeGreaterThan(0);
+        }, 240_000);
+
+        it("36d: a CUT that straddles the re-grant removes it from J's trust graph between R2's trust certificate and its match: the match does not count, R2's session certifies again against J's trust set and J stays gated", async () => {
+            const { record, holding, loggedBy } =
+                await cutStraddlesRegrant("certificate");
+            // The held certificate matched R2's anchor, so certify reached C3
+            // with it (on a mismatch it never reads the removal).
+            expect(holding.matched).toBe(true);
+            // C3 read the removal after C2: the same session went back to the
+            // top, found h2 missing from J's index and holds it logged.
+            expect(record.sessionsOpened).toBe(holding.sessions);
+            expect(loggedBy).toBe(holding.session);
         }, 240_000);
     });
 
