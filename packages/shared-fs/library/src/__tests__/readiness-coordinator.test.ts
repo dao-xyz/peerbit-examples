@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { Ed25519Keypair, type PublicSignKey } from "@peerbit/crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -43,7 +42,11 @@ import {
     type Proof,
 } from "../readiness/proof.js";
 import { PullQueue } from "../readiness/pull-queue.js";
-import { Responder, type ProvenanceState } from "../readiness/responder.js";
+import {
+    Responder,
+    systemTimers,
+    type ProvenanceState,
+} from "../readiness/responder.js";
 import {
     ReadinessRuntime,
     type JoinOptions,
@@ -6263,14 +6266,30 @@ describe("readiness coordinator: trust (PR-3 commit 3, SPEC3 9.5)", () => {
     });
 });
 
-/** The library's `src/` directory: product frames in a stack. */
-const SRC = fileURLToPath(new URL("..", import.meta.url));
+/**
+ * A stack frame in product code: `src/index.ts` or `src/readiness/` of
+ * this library. Either separator: stack frames on Windows read
+ * `D:/a/.../src/index.ts:1:2` while `fileURLToPath` gives backslashes, so
+ * comparing frames with a `fileURLToPath` path matched nothing there and
+ * every `armed` check passed whatever was armed.
+ */
+const PRODUCT_FRAME =
+    /[\\/]shared-fs[\\/]library[\\/]src[\\/](?:index\.ts:|readiness[\\/])/;
+
+/** The first product frame of `stack`, if any. */
+const productFrame = (stack: string) =>
+    stack
+        .split("\n")
+        .find((line) => PRODUCT_FRAME.test(line))
+        ?.trim();
 
 /**
  * Records every real timer armed from product code (`src/index.ts` and
- * `src/readiness/`) until `restore()`. The world's coordinator, sessions
- * and responders arm on its fake clock, so a real timer here is the host's
- * own.
+ * `src/readiness/`) until `restore()`, with the product frame that armed
+ * it. The world's coordinator, sessions and responders arm on its fake
+ * clock, so a real timer here is the host's own. Throws unless a timer
+ * that `src/readiness/responder.ts` arms counts (a positive control), so
+ * an empty `armed` is never a watch that recognizes no frame.
  */
 const watchProductTimers = () => {
     const armed: string[] = [];
@@ -6283,22 +6302,72 @@ const watchProductTimers = () => {
             Error.stackTraceLimit = 50;
             const stack = new Error().stack ?? "";
             Error.stackTraceLimit = limit;
-            if (
-                stack.includes(`${SRC}index.ts`) ||
-                stack.includes(`${SRC}readiness/`)
-            ) {
-                armed.push(name);
-            }
+            const frame = productFrame(stack);
+            if (frame !== undefined) armed.push(`${name} ${frame}`);
             return original(...args);
         }) as any);
     });
-    return {
-        armed,
-        restore: () => {
-            for (const spy of spies) spy.mockRestore();
-        },
+    const restore = () => {
+        for (const spy of spies) spy.mockRestore();
     };
+    systemTimers.clear(systemTimers.set(() => {}, 60_000));
+    const control = armed.splice(0);
+    if (control.length !== 1) {
+        restore();
+        throw new Error(
+            `watchProductTimers: the positive control (a setTimeout that src/readiness/responder.ts arms) recorded ${JSON.stringify(control)}, not one timer`
+        );
+    }
+    return { armed, restore };
 };
+
+describe("watchProductTimers", () => {
+    const LIBRARY = "packages/shared-fs/library";
+    const posix = `/home/runner/work/peerbit-examples/peerbit-examples/${LIBRARY}`;
+    const windows = `D:/a/peerbit-examples/peerbit-examples/${LIBRARY}`;
+
+    it("matches a product frame with either separator, and no other frame", () => {
+        const product = [
+            `    at SharedFileSystem.commitWriteReady (${posix}/src/index.ts:11651:9)`,
+            // Windows as vitest maps frames to the source, a file URL, and
+            // backslashes.
+            `    at SharedFileSystem.commitWriteReady (${windows}/src/index.ts:11651:9)`,
+            `    at file:///${windows}/src/readiness/coordinator.ts:10:5`,
+            `    at Object.set (${windows.replaceAll("/", "\\")}\\src\\readiness\\responder.ts:133:24)`,
+        ];
+        const other = [
+            `    at Object.<anonymous> (${windows}/src/__tests__/readiness-coordinator.test.ts:6290:13)`,
+            `    at run (${windows}/src/__tests__/readiness-timer-watch.ts:12:3)`,
+            `    at x (${windows}/lib/esm/index.js:1:2)`,
+            `    at y (${windows}/src/model.ts:5:6)`,
+            `    at z (D:/a/peerbit-examples/peerbit-examples/packages/shared-fs/cli/src/index.ts:1:1)`,
+            `    at listOnTimeout (node:internal/timers:588:17)`,
+        ];
+        for (const frame of product)
+            expect(productFrame(frame), frame).toBe(frame.trim());
+        for (const frame of other)
+            expect(productFrame(frame), frame).toBeUndefined();
+        // The comparison it replaces: a backslash path from fileURLToPath
+        // never occurs in a Windows frame.
+        const src = `${windows.replaceAll("/", "\\")}\\src\\`;
+        expect(product[1].includes(`${src}index.ts`)).toBe(false);
+    });
+
+    it("counts a timer product code arms on this platform", () => {
+        const timers = watchProductTimers();
+        try {
+            expect(timers.armed).toEqual([]);
+            systemTimers.clear(systemTimers.set(() => {}, 60_000));
+            expect(timers.armed).toEqual([
+                expect.stringMatching(
+                    /^setTimeout at .*[\\/]src[\\/]readiness[\\/]responder\.ts:\d+:\d+\)?$/
+                ),
+            ]);
+        } finally {
+            timers.restore();
+        }
+    });
+});
 
 /**
  * The host's half of the decision (index.ts, PR-3 commit 4): what the
