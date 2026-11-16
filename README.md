@@ -92,6 +92,31 @@ Ending with '&' to start a background process
 
 For more complete instructions on how to run a node in a server center that can be accessed remotely [see this](https://github.com/dao-xyz/peerbit/tree/master/packages/clients/peerbit-server).
 
+## Releasing packages
+
+Releases use [Changesets](https://github.com/changesets/changesets). While
+changesets are pending, the [Release workflow](./.github/workflows/release.yml)
+keeps a "Version Packages" pull request up to date. When that pull request
+merges, it runs [`scripts/release-packages.mjs`](./scripts/release-packages.mjs),
+which builds, validates and publishes every package version that is not on npm
+yet.
+
+The workflow publishes with
+[npm trusted publishing](https://docs.npmjs.com/trusted-publishers), so it needs
+no npm secret: npm 11.5.1 or later (the workflow runs Node 24) exchanges the
+job's OIDC id-token for a short-lived publish token, and each version still gets
+provenance. Every package it publishes needs a trusted publisher in its settings
+on npmjs.com: GitHub Actions, organization `dao-xyz`, repository
+`peerbit-examples`, workflow filename `release.yml`, no environment. npm expires
+a new trusted publisher that has not published within 2 days, so add it shortly
+before the package's next release. A package that is not on npm yet has no
+settings page, so its first version needs the token or a manual publish.
+
+The `NPM_TOKEN` repository secret is an optional fallback. npm tries trusted
+publishing first and uses the token only when that exchange fails, for example
+for a package without a trusted publisher; without the secret, such a package
+fails to publish.
+
 ## Cloudflare hosting
 
 The public frontends are hosted with Cloudflare Workers Static Assets, with a
