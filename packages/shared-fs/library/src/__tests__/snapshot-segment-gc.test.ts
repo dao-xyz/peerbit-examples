@@ -10,8 +10,38 @@ import {
     openSharedFs,
     type SharedFsHandle,
 } from "../index.js";
+import { within } from "./within.js";
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * afterEach cleanup of a test's on-disk peer. Vitest does not stop a body
+ * that timed out, so a `finally` there never runs and this worker
+ * (isolate: false) would run its next files with the peer still open. The
+ * stop is bounded: a stop that hangs is logged and fails the test by name,
+ * and the directory stays.
+ */
+const stopOnDisk = async (
+    name: string,
+    creating: Promise<Peerbit>,
+    directory: string,
+    { ignoreStopErrors = false } = {}
+) => {
+    const stopping = creating.then(
+        (peer) =>
+            ignoreStopErrors ? peer.stop().catch(() => {}) : peer.stop(),
+        () => {} // A failed create left nothing to stop.
+    );
+    try {
+        await within(`${name}.stop()`, stopping);
+    } catch (error) {
+        console.warn(
+            `${(error as Error)?.message ?? error}; ${directory} is left in place`
+        );
+        throw error;
+    }
+    rmSync(directory, { recursive: true, force: true });
+};
 
 const CALLER_EXCLUSIVE_BLOCK_STORE_SAFETY = Object.freeze({
     referenceDomain: "caller-exclusive",
@@ -115,13 +145,27 @@ describe("snapshot segment reclamation", () => {
         });
     });
 
+    /** Bounded stops (stopOnDisk) of the running test's on-disk peers. */
+    const onDiskStops: Array<() => Promise<void>> = [];
+
     afterEach(async () => {
+        // First, as the test's own `finally` did: this hook runs before the
+        // setup's afterEach, so a readiness shadow difference recorded at
+        // that close still fails this test, not the file. A stop that fails
+        // is rethrown below, and Vitest then skips the setup's afterEach:
+        // the test fails with the stop's error, and a difference recorded at
+        // that close is reported by the file's afterAll.
+        const stopFailures: unknown[] = [];
+        for (const stop of onDiskStops.splice(0)) {
+            await stop().catch((error) => stopFailures.push(error));
+        }
         vi.restoreAllMocks();
         try {
             await peer.stop();
         } catch {
             /* benign double-stop */
         }
+        if (stopFailures.length > 0) throw stopFailures[0];
     });
 
     const seedFiles = async (count = 12) => {
@@ -269,82 +313,99 @@ describe("snapshot segment reclamation", () => {
         const directory = mkdtempSync(
             join(tmpdir(), "sfs-segment-partial-put-")
         );
-        const partialPeer = await Peerbit.create({
-            directory: join(directory, "peer"),
-        });
-        try {
-            const partialFs = await openSharedFs({
+        const creating = Peerbit.create({ directory: join(directory, "peer") });
+        onDiskStops.push(() =>
+            stopOnDisk("partialPeer", creating, directory, {
+                ignoreStopErrors: true,
+            })
+        );
+        const partialPeer = await within("Peerbit.create", creating);
+        const partialFs = await within(
+            "openSharedFs",
+            openSharedFs({
                 peerbit: partialPeer,
                 machineLabel: "segment-partial-put",
                 snapshot: { disabled: true },
                 gc: false,
-            });
-            for (let i = 0; i < 16; i++) {
-                await partialFs.writeFile(`/partial-${i}.txt`, `before-${i}`);
-            }
-            const baseline = await partialFs.snapshotWrite();
-            expect(baseline.segments).toBeGreaterThan(1);
+            })
+        );
+        for (let i = 0; i < 16; i++) {
+            await within(
+                `writeFile /partial-${i}.txt`,
+                partialFs.writeFile(`/partial-${i}.txt`, `before-${i}`)
+            );
+        }
+        const baseline = await within(
+            "the first snapshotWrite",
+            partialFs.snapshotWrite()
+        );
+        expect(baseline.segments).toBeGreaterThan(1);
 
-            const program: any = partialFs.program;
-            const manifestId = `bootstrap:${program.authorKey()}`;
-            const manifestBefore = await program.getDocument(manifestId);
-            expect(manifestBefore).toBeDefined();
-            for (let i = 0; i < 16; i++) {
-                await partialFs.writeFile(`/partial-${i}.txt`, `after-${i}`);
-            }
+        const program: any = partialFs.program;
+        const manifestId = `bootstrap:${program.authorKey()}`;
+        const manifestBefore = await program.getDocument(manifestId);
+        expect(manifestBefore).toBeDefined();
+        for (let i = 0; i < 16; i++) {
+            await within(
+                `rewriting /partial-${i}.txt`,
+                partialFs.writeFile(`/partial-${i}.txt`, `after-${i}`)
+            );
+        }
 
-            const blocksAny: any = program.node.services.blocks;
-            const originalPut = blocksAny.put.bind(blocksAny);
-            const successfulCids: string[] = [];
-            let putCalls = 0;
-            blocksAny.put = async (...args: any[]) => {
-                putCalls++;
-                if (putCalls === 2) {
-                    throw new Error("injected later shard put failure");
-                }
-                const cid = await originalPut(...args);
-                successfulCids.push(cid);
-                return cid;
-            };
-            let failure: unknown;
-            try {
-                failure = await partialFs.snapshotWrite().then(
+        const blocksAny: any = program.node.services.blocks;
+        const originalPut = blocksAny.put.bind(blocksAny);
+        const successfulCids: string[] = [];
+        let putCalls = 0;
+        blocksAny.put = async (...args: any[]) => {
+            putCalls++;
+            if (putCalls === 2) {
+                throw new Error("injected later shard put failure");
+            }
+            const cid = await originalPut(...args);
+            successfulCids.push(cid);
+            return cid;
+        };
+        let failure: unknown;
+        try {
+            failure = await within(
+                "the snapshotWrite with a failing put",
+                partialFs.snapshotWrite().then(
                     () => undefined,
                     (error) => error
-                );
-            } finally {
-                blocksAny.put = originalPut;
-            }
-
-            expect(failure).toMatchObject({
-                message: "injected later shard put failure",
-            });
-            expect(putCalls).toBe(2);
-            expect(successfulCids).toHaveLength(1);
-            const ledgerPath = await program.segmentLedgerPath();
-            expect(ledgerPath).toBeDefined();
-            const durableLedger = JSON.parse(
-                await readFile(ledgerPath, "utf8")
-            );
-            const recorded = new Set([
-                ...(durableLedger.current?.cids ?? []).map(
-                    (entry: any) => entry.cid
-                ),
-                ...durableLedger.retired.flatMap((generation: any) =>
-                    generation.cids.map((entry: any) => entry.cid)
-                ),
-            ]);
-            for (const cid of successfulCids) {
-                expect(recorded.has(cid)).toBe(true);
-            }
-            const manifestAfter = await program.getDocument(manifestId);
-            expect(manifestAfter?.payloadBytes).toEqual(
-                manifestBefore.payloadBytes
+                )
             );
         } finally {
-            await partialPeer.stop().catch(() => {});
-            rmSync(directory, { recursive: true, force: true });
+            blocksAny.put = originalPut;
         }
+
+        expect(failure).toMatchObject({
+            message: "injected later shard put failure",
+        });
+        expect(putCalls).toBe(2);
+        expect(successfulCids).toHaveLength(1);
+        const ledgerPath: string = await within(
+            "segmentLedgerPath",
+            program.segmentLedgerPath()
+        );
+        expect(ledgerPath).toBeDefined();
+        const durableLedger = JSON.parse(
+            await within("readFile of the ledger", readFile(ledgerPath, "utf8"))
+        );
+        const recorded = new Set([
+            ...(durableLedger.current?.cids ?? []).map(
+                (entry: any) => entry.cid
+            ),
+            ...durableLedger.retired.flatMap((generation: any) =>
+                generation.cids.map((entry: any) => entry.cid)
+            ),
+        ]);
+        for (const cid of successfulCids) {
+            expect(recorded.has(cid)).toBe(true);
+        }
+        const manifestAfter = await program.getDocument(manifestId);
+        expect(manifestAfter?.payloadBytes).toEqual(
+            manifestBefore.payloadBytes
+        );
     });
 
     it("queues a reaper behind the publisher's whole block-store mutation", async () => {
@@ -1215,55 +1276,65 @@ describe("snapshot segment reclamation", () => {
 
     it("generation CAS merges a stale write instead of losing cids", async () => {
         const dir = mkdtempSync(join(tmpdir(), "sfs-segment-cas-"));
-        const casPeer = await Peerbit.create({ directory: join(dir, "peer") });
-        try {
-            const casFs = await openSharedFs({
-                peerbit: casPeer,
-                machineLabel: "segment-gc-cas",
-            });
-            const program: any = casFs.program;
-            for (let i = 0; i < 4; i++) {
-                await casFs.writeFile(`/c-${i}.txt`, `v${i}`);
-            }
-            await casFs.snapshotWrite();
-            const ledger = await program.loadSegmentLedger();
-            expect(ledger.generation).toBeGreaterThan(0);
-            expect(ledger.current).not.toBeNull();
-
-            // A stale writer (generation 0 view) tries to record a
-            // different retired gen: the CAS path must merge, not clobber
-            // — no positively-recorded cid may vanish.
-            const stale = {
-                v: 1,
-                generation: 0,
-                current: null,
-                retired: [
-                    {
-                        cids: [{ cid: "stale-cid-1", bytes: 11 }],
-                        retiredAtMs: 123,
-                        snapshotSeq: "9",
-                    },
-                ],
-            };
-            const ok = await program.saveSegmentLedgerCas(0, stale);
-            expect(ok).toBe(true);
-            const path = await program.segmentLedgerPath();
-            const merged = JSON.parse(await readFile(path, "utf8"));
-            expect(merged.generation).toBe(ledger.generation + 1);
-            // The live current survived the stale writer...
-            expect(merged.current?.cids?.length).toBe(
-                ledger.current.cids.length
+        const creating = Peerbit.create({ directory: join(dir, "peer") });
+        onDiskStops.push(() => stopOnDisk("casPeer", creating, dir));
+        // Each on-disk step fails by name if it stalls (see within.ts).
+        const casPeer = await within("Peerbit.create", creating);
+        const casFs = await within(
+            "openSharedFs",
+            openSharedFs({ peerbit: casPeer, machineLabel: "segment-gc-cas" })
+        );
+        const program: any = casFs.program;
+        for (let i = 0; i < 4; i++) {
+            await within(
+                `writeFile /c-${i}.txt`,
+                casFs.writeFile(`/c-${i}.txt`, `v${i}`)
             );
-            // ...and the stale writer's retired gen was folded in.
-            expect(
-                merged.retired.some((g: any) =>
-                    g.cids.some((c: any) => c.cid === "stale-cid-1")
-                )
-            ).toBe(true);
-        } finally {
-            await casPeer.stop();
-            rmSync(dir, { recursive: true, force: true });
         }
+        await within("snapshotWrite", casFs.snapshotWrite());
+        const ledger: any = await within(
+            "loadSegmentLedger",
+            program.loadSegmentLedger()
+        );
+        expect(ledger.generation).toBeGreaterThan(0);
+        expect(ledger.current).not.toBeNull();
+
+        // A stale writer (generation 0 view) tries to record a
+        // different retired gen: the CAS path must merge, not clobber
+        // — no positively-recorded cid may vanish.
+        const stale = {
+            v: 1,
+            generation: 0,
+            current: null,
+            retired: [
+                {
+                    cids: [{ cid: "stale-cid-1", bytes: 11 }],
+                    retiredAtMs: 123,
+                    snapshotSeq: "9",
+                },
+            ],
+        };
+        const ok = await within(
+            "saveSegmentLedgerCas",
+            program.saveSegmentLedgerCas(0, stale)
+        );
+        expect(ok).toBe(true);
+        const path: string = await within(
+            "segmentLedgerPath",
+            program.segmentLedgerPath()
+        );
+        const merged = JSON.parse(
+            await within("readFile of the ledger", readFile(path, "utf8"))
+        );
+        expect(merged.generation).toBe(ledger.generation + 1);
+        // The live current survived the stale writer...
+        expect(merged.current?.cids?.length).toBe(ledger.current.cids.length);
+        // ...and the stale writer's retired gen was folded in.
+        expect(
+            merged.retired.some((g: any) =>
+                g.cids.some((c: any) => c.cid === "stale-cid-1")
+            )
+        ).toBe(true);
     });
 
     it("another author's live manifest protects identical cids", async () => {

@@ -1,11 +1,13 @@
 import { writeSync } from "node:fs";
 import { stopTestPeers } from "../../../packages/shared-fs/library/src/__tests__/stop-test-peers.ts";
 import {
+    afterAll,
     afterEach,
     beforeAll,
     beforeEach,
     describe,
     expect,
+    onTestFinished,
     test,
 } from "vitest";
 
@@ -123,6 +125,74 @@ describe("strict CI fixture", () => {
         });
         test("retry passes after after hook fails", { retry: 1 }, () => {
             expect(true).toBe(true);
+        });
+    });
+
+    describe("hang report", () => {
+        test("hangs past the hang report", { timeout: 3_000 }, async () => {
+            // Stands in for the library's readiness registry: ten live
+            // runtimes, the last three owned, throwing and oversized.
+            const owned = {
+                debug: () => ({ armedTimers: 0, coordinator: { sessions: 1 } }),
+            };
+            const throwing = {
+                debug: () => {
+                    throw new Error("DEBUG_UNAVAILABLE");
+                },
+            };
+            const oversized = { debug: () => ({ rows: "x".repeat(10_000) }) };
+            const runtimes = [
+                ...Array.from({ length: 7 }, () => ({ debug: () => ({}) })),
+                owned,
+                throwing,
+                oversized,
+            ];
+            globalThis.__SFS_READINESS_SHADOW__ = {
+                runtimes: new Map(
+                    runtimes.map((runtime, index) => [
+                        `nonce-${index}`,
+                        new WeakRef(runtime),
+                    ])
+                ),
+                live: new WeakMap([
+                    [owned, { file: "owner.test.ts", test: "opened it" }],
+                ]),
+                // Keeps the weakly referenced runtimes alive.
+                held: runtimes,
+            };
+            onTestFinished(() => {
+                delete globalThis.__SFS_READINESS_SHADOW__;
+            });
+            // 50 ms for the event loop delay monitor to take a sample, then
+            // a synchronous call holding the JS thread for 300 ms (on the
+            // clock the report uses; the report is due at 200 ms), then an
+            // await that never settles.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const blockedUntil = performance.now() + 300;
+            while (performance.now() < blockedUntil);
+            await new Promise(() => {});
+        });
+    });
+
+    describe("hang in an after hook", () => {
+        afterEach(() => new Promise(() => {}), 2_000);
+        test("passes, then its afterEach hangs", () => {
+            expect(true).toBe(true);
+        });
+    });
+
+    describe("hang report disarmed", () => {
+        // Keeps the worker running past the threshold after the attempt
+        // ended: a report still armed would fire here.
+        afterAll(() => new Promise((resolve) => setTimeout(resolve, 1_000)));
+        test("passes before a slow afterAll", () => expect(true).toBe(true));
+    });
+
+    describe("hang report beside a timeout", () => {
+        // Run with the report due 10 ms before this timeout: the probe
+        // still runs when the attempt fails.
+        test("times out while its probe runs", { timeout: 600 }, async () => {
+            await new Promise(() => {});
         });
     });
 });
