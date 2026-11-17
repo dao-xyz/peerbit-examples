@@ -30,8 +30,9 @@ network no longer says it mounts from local state, and names that network if
 its open then fails. The other commands still fail at once, now naming the
 address, when a `--peer` cannot be dialled or no `--bootstrap` node answers.
 
-For code that imports the CLI module: `connectMountToNetwork(peerbit, network,
-warn?)` now takes the parsed options `{ peer, bootstrap }` instead of the
-`--peer` value, uses `peerbit.services.fanout`, and returns what it could not
-reach; `connectToNetwork` and `mountOpenError` are exported. No wire or
-storage format changes.
+For code that imports the CLI module:
+`connectMountToNetwork(peerbit, network, warn?)` now takes the parsed options
+`{ peer, bootstrap }` instead of the `--peer` value, uses
+`peerbit.services.fanout`, and returns what it could not reach;
+`connectToNetwork` and `mountOpenError` are exported. No wire or storage format
+changes.
