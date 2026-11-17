@@ -118,15 +118,20 @@ jobs:
                   project_dir="$RUNNER_TEMP/shared-fs-install-smoke"
                   adapter_dir="$RUNNER_TEMP/shared-fs-native-adapter"
                   cd "$project_dir"
-                  if [[ "${GITHUB_HEAD_REF:-}" == changeset-release/* ]]; then
-                    # A version PR's package version has no matching native
-                    # release until after merge. Validate its installer against
-                    # the latest published cohort instead of waiting on an
-                    # asset that cannot exist yet.
+                  # Release makes a version's adapter assets downloadable before it
+                  # publishes that version to npm. Until npm lists the packed CLI's
+                  # version (a version PR, or master while a release is in flight),
+                  # its assets may not exist yet, so validate the installer against
+                  # npm's latest release instead. Release's pack-install smoke and
+                  # the Published NPM Smoke install the new version's own adapter.
+                  cli_version="$(node -p 'require("./node_modules/@peerbit/shared-fs-cli/package.json").version')"
+                  published_versions="$(npm view @peerbit/shared-fs-cli versions --json)"
+                  cli_published="$(node -e 'const [version, list] = process.argv.slice(1); console.log([].concat(JSON.parse(list)).includes(version) ? "yes" : "no")' "$cli_version" "$published_versions")"
+                  if [ "$cli_published" = "no" ]; then
                     published_adapter_version="$(npm view @peerbit/shared-fs-cli version)"
                     test -n "$published_adapter_version"
                     export SHARED_FS_NATIVE_ADAPTER_VERSION="$published_adapter_version"
-                    echo "version PR: validating native adapter ${published_adapter_version}"
+                    echo "@peerbit/shared-fs-cli ${cli_version} is not on npm yet: validating native adapter ${published_adapter_version}"
                   fi
                   adapter_path="$(bash "$GITHUB_WORKSPACE/scripts/shared-fs-install-adapter-with-retry.sh" "$adapter_dir" node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js)"
                   test -f "$adapter_path"
