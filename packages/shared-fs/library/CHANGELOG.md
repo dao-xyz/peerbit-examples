@@ -1,5 +1,204 @@
 # @peerbit/shared-fs
 
+## 0.18.0
+
+### Minor Changes
+
+- 11a32ab: A warm replica's freshness check now also compares with the peers that show up
+  after it turned fresh (M2 PR-5a), so replicas reopened at the same moment no
+  longer stay fresh without having compared with each other. As for a join, a
+  peer known only by its replicator row, with no sign of life, such as a replica
+  that is still opening, is asked once and stops counting if it does not answer;
+  `bootstrapStatus().freshness.unconfirmed` now lists such peers.
+    - Once fresh, the check rests: it asks nothing and arms no timer, but keeps
+      listening. A sign of life from a peer that never answered it (its readiness
+      subscription, any readiness message or a replication announcement) has that
+      peer asked. So do the first readiness message of a peer it has not met, such
+      as a replica reopened after it, and the return of a peer that left before
+      answering, if it showed life since it was last asked. The state is then
+      `checking`, and the replica tells peers of this release `warm` instead of
+      `warm-fresh`, until that peer is contained, gone or excluded; then it is
+      `fresh` again, with `freshness:change` at each change and the `WARM_FRESH`
+      notices sent again. In an access-controlled store, a removal from the trust
+      set has the contained peers asked again the same way.
+    - At rest, a peer that answered (a header, `BUSY` or a refusal) is not asked
+      again; one that left with a gap is asked again if it is back when the check
+      next runs, unless it closed its store. A peer that never showed a sign of
+      life costs no request at rest, however its route moves. A subscription
+      relayed for a dead peer that never answered, whose route lingers, counts as
+      a sign of life, as while the check runs, and keeps the state at `checking`
+      until that route goes.
+    - Under `writeReadiness.requireFreshOnReopen` the first `fresh` still releases
+      the write gate; a later return to `checking` changes the label only, and the
+      replica stays writable.
+    - `freshness.ms` is the time from the end of the open to the latest `fresh`.
+      The bootstrap telemetry's `freshness` event gains an `unconfirmed` count, and
+      `peerbit-fs status --json` shows `unconfirmed` with the rest of `freshness`.
+
+- 7aaac2d: Every replica now refuses rows outside fixed limits, at ingest (local writes,
+  replication, repair) and when it installs a snapshot segment, so one buggy or
+  hostile writer can no longer publish them. Before, ingest checked only that
+  `causalDepth` was at least 1, so a row at 2^64-1 won its file or name for
+  good: no write could follow it, since a child's depth no longer fits in a
+  u64. A chunk list, a parent list and a name had no bound.
+    - A name is at most 255 bytes of UTF-8 (`MAX_NAME_BYTES`) and holds no `\`,
+      NUL, other control character (U+0001-U+001F, U+007F) or lone surrogate,
+      besides the rules before (not empty, `.` or `..`, no `/`). Every library
+      path reads `\` as `/`, so no write could reach such a name. `writeFile`,
+      `writeBatch`, `mkdir`, `rename`, `resolveNamingConflict` (`move`) and the
+      mount backend's create, `mkdir`, `rename` and `symlink` fail before writing
+      anything, with the new code `ENAMETOOLONG` (too long) or with `EINVAL`.
+      The mount backend no longer reads a `\` in a Linux or macOS name as a
+      separator: creating such a name, or renaming from or to one, fails with
+      `EINVAL`, and other calls on it with `ENOENT`, where `x\y` used to reach
+      `x/y`.
+    - `chunkSize` is an integer from 1 to 4 MiB (`MAX_FILE_CHUNK_SIZE`), else
+      `EINVAL`. A version lists at most 65,536 chunks (`MAX_FILE_VERSION_CHUNKS`,
+      repeats included, so a sparse file of repeated zero chunks fits) and 8,000
+      distinct ones, and exactly as many as some chunk size up to 4 MiB gives its
+      size. A write that needs more chunks fails with the new code `EFBIG`, and
+      one with more distinct chunks with `EINVAL` as before (about 3.9 GiB of
+      distinct bytes at the default chunk size); the mount backend refuses to
+      grow a file past 65,536 default chunks (32 GiB) with `EFBIG`. A read sums
+      and hashes a version's chunks before assembling them, so a version whose
+      chunks do not match its size or hash fails with `EIO` without being
+      allocated.
+    - A version or naming event lists at most 8,000 parents. A longer list used to
+      fail in the indexer after its log append (more than 8,191 parents), so a
+      flood of concurrent heads blocked every write to a file with a raw SQLite
+      error, and a write reported as failed could show after a reopen. A write
+      over more than 8,000 content heads now supersedes the 8,000 best-ranked and
+      still shows; later writes supersede the rest (a conflict until then, where
+      their bytes differ).
+    - `causalDepth` is at most 2^53-1 (`MAX_CAUSAL_DEPTH`). Writers saturate
+      there, so a child of a row at the cap keeps the cap, still supersedes its
+      parent, and ties with concurrent heads on depth, which then order as at
+      any equal depth (for names, a head that keeps the node beats a removal;
+      then the smaller id wins). A depth is still the writer's claim: a row at
+      the cap outranks concurrent edits until a write follows it.
+
+    This tightens the format without a migration: releases before it accept rows
+    newer ones refuse, so in a mixed fleet older peers can hold such rows; newer
+    peers refuse them, still become write-ready and keep syncing everything else.
+    A snapshot segment holding one fails the joiner's bootstrap. Rows a store
+    accepted before upgrading stay in it. A file or directory whose name breaks
+    the new rules can be read and renamed, but writing, removing or keeping it
+    under that name fails with `EINVAL` or `ENAMETOOLONG`: rename it first (by
+    node id, with `resolveNamingConflict`, when its name holds `\`). Newer peers
+    refuse an older peer's removal of such a node. Chunk sizes between 4 MiB and
+    the 5 MB document cap, which earlier releases accepted, are now refused.
+
+- 0c066da: A warm reopen now checks whether it is still fresh (M2 freshness, labels only).
+  At the end of a warm full-replica open, the replica runs the join's readiness
+  exchange with every peer of the filesystem it can see, with no write-readiness
+  decision: it is fresh once every visible peer is contained, gone or excluded,
+  at least one is contained and, with access control, the trust rules hold. No
+  qualified donor is needed, so two warm replicas reopened together check each
+  other; a peer that left before answering is recorded in `freshness.gaps`, as a
+  join records it. The check runs once per open, arms no timer and asks nothing
+  again once it held; only the state file's `hlcProved` hint is updated. The warm
+  replica stays writable throughout: no joiner's decision changes, and `warm`
+  still qualifies a donor.
+    - `bootstrapStatus().freshness` (`FreshnessStatus`, `FreshnessState`) reports
+      the check on a warm full-replica open, and `freshness:change` is dispatched
+      on `fs.program.events` at each state change. The bootstrap telemetry gains a
+      `freshness` event with the state, the peer counts, `ms` and the requests the
+      check sent. `bootstrapStatus().readiness` stays undefined on a warm reopen.
+    - New option `writeReadiness: { requireFreshOnReopen: true }`: a warm reopen
+      stays write-gated (`EAGAIN`, resurrection guard armed) until its check holds,
+      then turns writable with the source and proof its state file already holds,
+      and dispatches `write:ready`. Offline it stays gated, and so it does while a
+      visible peer stays silent or answered `BUSY` with no message or capacity
+      notice since (a refusal on a fault of that peer's own readiness state);
+      `assumeComplete()` releases it as `operator`. It is refused with
+      `allowPartialWrites`.
+    - Once fresh, a replica tells askers of this release `warm-fresh` instead of
+      `warm` and sends each peer it exchanged requests with a `WARM_FRESH` notice.
+      A joiner now advertises readiness caps bit 0 (`CAP_FRESHNESS`) in its OPEN
+      and counts a `warm-fresh` donor as qualified, as it counts `warm`. No wire
+      layout, store salt or format tag changes: 0.17.x already decodes the bit, the
+      source and the notice reason.
+
+    A mixed 0.17.x / this-release pair behaves as before. A 0.17.x joiner never sets
+    the bit, so a warm donor of this release answers it `warm`, which it qualifies,
+    and labels its notices to it `warm` as well: a 0.17.x joiner that met a
+    `requireFreshOnReopen` replica while it was gated qualifies it on the notice of
+    its flip, and a `WARM_FRESH` notice changes none of its records.
+    A joiner of this release still qualifies a 0.17.x warm donor through `warm`. A
+    0.17.x warm replica runs no check and never reports `warm-fresh`; a warm replica
+    of this release checks against it like any other peer, and a 0.17.x joiner
+    answers that check as it answers a join.
+
+### Patch Changes
+
+- ddea63e: A native mount no longer drops what was written through an open file when
+  another machine renames, replaces or deletes that file before the bytes are
+  saved. The mount discarded the buffered bytes of such a descriptor while
+  `flush`, `fsync` and close reported success, or failed the save with `EAGAIN`
+  and closed the descriptor. Now the save goes to the same file node: after a
+  rename the bytes land at the file's new path, and after a delete or replace
+  the delete stays visible and the save is a `delete-vs-edit` naming conflict,
+  as for `writeFile`. A naming-conflict `move` brings it back (and lists both
+  versions as a content conflict if the other side had also edited the file);
+  `restore` brings it back only at its old path. The fence succeeds only once
+  that save is committed and fails with an error otherwise, keeping the bytes.
+  The stored format and the wire are unchanged.
+    - This mount's own `unlink`, or a rename over the open file, still leaves the
+      descriptors whose writes that path showed an anonymous file that is never
+      saved, as in POSIX. An older descriptor of the same file, whose bytes that
+      path never showed because another machine had moved the file, still saves
+      them, as a `delete-vs-edit`.
+    - When the version an open file builds on is unavailable (not yet replicated,
+      or retired), its fence now fails with `EIO` and the descriptor keeps its
+      path and bytes, instead of being treated as a path change.
+    - `SharedFileSystem.writeNodeForMount()` and
+      `SharedFsHandle.writeNodeForMount()` write to a file node wherever it is
+      named now; an optional `guard` vets that path first.
+      `SharedFsMountBackendTarget` gains it as an optional member. On a custom
+      target without it, such a save fails with `EIO` and keeps the bytes.
+      `IgnoreAwareFs` applies its write policy to both the path the mount last
+      saw and the path the save lands at.
+    - Not covered yet: a new file the mount has never saved. If another machine
+      renames, removes or replaces a directory on its path before the first save,
+      that save still fails and the bytes are lost.
+
+- 4861f64: A joining replica of an access-controlled filesystem no longer turns writable
+  without the files of a writer whose grant left its trust graph during the join
+  while a peer still held that grant. When a writer is revoked and later granted
+  again, the owner's old revocation can reach a joiner while the new grant is
+  still being indexed, and then removes the new grant from the joiner's trust
+  graph again. Before, a peer's trust view checked against the joiner's trust
+  graph before that removal still counted afterwards: the joiner explained the
+  writer's rows as untrusted and turned writable without them, so it accepted
+  writes on a view that lacked that writer's files.
+
+    Now a trust check made before any removal from the joiner's trust graph no
+    longer counts. The joiner checks that peer again, in the same session when the
+    check had not finished yet, or by asking the peer again, and the writer's rows
+    stay pending. Such a joiner now stays gated instead (not writable;
+    `awaitWriteReady` keeps waiting, and `bootstrapStatus().readiness` reports it
+    waiting) for as long as its trust graph lacks a grant its peers hold;
+    `assumeComplete()` still releases it. The readiness coordinator's debug output
+    records the last removal (`trustRemovedAt`) and counts the checks asked again
+    (`staleTrust`).
+
+    A join also no longer stalls when a change to the joiner's trust graph, or a
+    peer's trust check completing, arrives just as its check of a peer's waiting
+    rows ends: the check now runs again instead of leaving those rows waiting with
+    nothing scheduled.
+
+- 322420a: `close()` no longer waits on the `writers-unheard` telemetry. With
+  `telemetry.bootstrap` set, an access-controlled replica reports
+  `writers-unheard` once after its join turns writable, and `close()` waits for
+  that report to end. The report read the trusted writer keys through the trust
+  graph's peers (`TrustedNetwork.getTrusted()`), which waits out a search timeout
+  for each peer that does not answer: once the peers it had asked stopped,
+  closing the replica took about two minutes. The report now reads the trusted
+  keys from this replica's own trust graph and stops when the filesystem closes,
+  so `close()` no longer waits on other peers for it. The event's fields are
+  unchanged. `trustedWriters()` still asks the trust graph's peers, so it can
+  wait on peers that do not answer.
+
 ## 0.17.2
 
 ### Patch Changes

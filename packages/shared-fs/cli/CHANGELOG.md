@@ -1,5 +1,82 @@
 # @peerbit/shared-fs-cli
 
+## 0.18.0
+
+### Minor Changes
+
+- 5f82a74: `mount --peer` now starts when that peer is down and reconnects to it. Before,
+  a `--peer` that could not be dialled stopped `mount`, and only a `--peer` that
+  answered at mount start was ever dialled again. Now `mount` warns, naming the
+  address, and goes on, and every `--peer` is registered for Peerbit's pubsub
+  redial whatever its first dial did. Pubsub redials a down address about once a
+  second while no other `--peer` or `--bootstrap` address is connected, so a
+  single `--peer` hub restarted at the same address is usually connected again
+  within about 2 s. While another one is connected, the mount dials the down
+  address when it writes and otherwise only about once a minute, so an idle
+  mount can take that long to sync with a hub that came back; a faster idle
+  redial needs a change in Peerbit. A remount from a writable state directory is
+  writable meanwhile; a first mount still needs a peer that holds the
+  filesystem, and when none answers its error now names the addresses it could
+  not reach. Without `--bootstrap`, a `--peer` mount still never bootstraps, so
+  its pubsub topic-root candidates stay automatic, and no `--peer` mount uses
+  Peerbit's bootstrap recovery, whose bootstrap would pin them to the nodes it
+  reached.
+
+    The new repeatable `--bootstrap <multiaddr>` replaces the public bootstrap
+    list, which is then not fetched, wherever `--peer` is accepted. A mount
+    bootstraps from it and, without `--peer`, recovers from it whenever it has no
+    connections at all, with backoff from about 1 s to 60 s. Given together, the
+    mount bootstraps from the `--bootstrap` list and dials each `--peer`. Without
+    either option only messages change: a mount that cannot reach the public
+    network no longer says it mounts from local state, and names that network if
+    its open then fails. The other commands still fail at once, now naming the
+    address, when a `--peer` cannot be dialled or no `--bootstrap` node answers.
+
+    For code that imports the CLI module:
+    `connectMountToNetwork(peerbit, network, warn?)` now takes the parsed options
+    `{ peer, bootstrap }` instead of the `--peer` value, uses
+    `peerbit.services.fanout`, and returns what it could not reach;
+    `connectToNetwork` and `mountOpenError` are exported. No wire or storage format
+    changes.
+
+- 0c066da: `mount --require-fresh` keeps a warm remount from becoming writable until the
+  replica has compared its view with the peers of the filesystem it can see,
+  within `--write-ready-timeout-ms` (the library's
+  `writeReadiness.requireFreshOnReopen`). It cannot be combined with
+  `--assume-complete` or `--allow-partial-writes`. `mount` and `status` print
+  `freshness: <state>` for a warm replica, and `status --json` includes
+  `freshness`. Every command but `mount` checks freshness only if a peer asks it,
+  so a script that runs `status` repeatedly adds no freshness requests.
+
+### Patch Changes
+
+- 7aaac2d: The native adapter passes the library's new `ENAMETOOLONG` and `EFBIG` errors
+  to the kernel as themselves instead of `EIO`: creating or renaming to a name
+  of more than 255 bytes of UTF-8 fails with `ENAMETOOLONG`, and growing a
+  mounted file past 32 GiB fails with `EFBIG`. The change reaches users through
+  this CLI version's adapter release (`shared-fs-native-v<version>`).
+- aeb2e10: Native mounts work on Linux with libfuse 3.17 or newer, such as Ubuntu 26.04
+  (libfuse 3.18). libfuse 3.17.1 renamed its library from `libfuse3.so.3` to
+  `libfuse3.so.4`, and the native adapter only looked for `libfuse3.so.3`, so
+  `peerbit-fs mount` failed there: the adapter exited with
+  `cgofuse: cannot find FUSE`. The adapter now builds against
+  `github.com/dao-xyz/cgofuse v1.6.0-peerbit.2`, which loads `libfuse3.so.4`
+  when `libfuse3.so.3` is absent (until winfsp/cgofuse#112 is released). Hosts
+  with libfuse 3.16 or older keep loading `libfuse3.so.3`.
+
+    The change is in the native adapter, so it reaches users through this CLI
+    version's adapter release (`shared-fs-native-v<version>`), which the release
+    publishes automatically. Installing the CLI fetches it; otherwise run
+    `peerbit-fs install-adapter`.
+
+- Updated dependencies [11a32ab]
+- Updated dependencies [ddea63e]
+- Updated dependencies [4861f64]
+- Updated dependencies [7aaac2d]
+- Updated dependencies [0c066da]
+- Updated dependencies [322420a]
+    - @peerbit/shared-fs@0.18.0
+
 ## 0.17.2
 
 ### Patch Changes
