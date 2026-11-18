@@ -72,6 +72,9 @@ const job = (
     } = {}
 ) => {
     const id = nextId++;
+    // A job that finished without ever getting a runner lists runner 0,
+    // named "", as run 44119409037's macOS job did; a queued one lists none.
+    const finished = status === "completed";
     return {
         id,
         name,
@@ -81,8 +84,9 @@ const job = (
         // A job that never got a runner shows its creation time, as run
         // 44119409037's macOS job did.
         started_at: (runner ? started : created).toISOString(),
-        completed_at: status === "completed" ? completed.toISOString() : null,
-        runner_name: runner ? `GitHub Actions ${id}` : null,
+        completed_at: finished ? completed.toISOString() : null,
+        runner_id: runner ? id : finished ? 0 : null,
+        runner_name: runner ? `GitHub Actions ${id}` : finished ? "" : null,
         steps: !runner
             ? []
             : [
@@ -482,7 +486,7 @@ test("fails at once when a runner never came and the job was cancelled", async (
     const [error] = errors(lines);
     assert.match(
         error,
-        /Join peer \(macos\) finished \(cancelled\) before it reported presence, so macos cannot take part in the interop$/
+        /Join peer \(macos\) finished \(cancelled\) without ever getting a runner \(it was queued for 18m4\ds\), so macos cannot take part in the interop$/
     );
     assert.doesNotMatch(error, /earlier run attempt/);
 });
@@ -509,6 +513,128 @@ test("fails when a present sibling gave up before every peer was ready", async (
         errors(lines)[0],
         /Seed peer \(linux\) finished \(failure\) after it reported presence, before every peer was ready/
     );
+});
+
+test("tells whether a sibling finished before or after every peer was ready, by the step times", async (t) => {
+    const created = new Date(Date.now() - 60_000);
+    const at = (seconds) => new Date(created.getTime() + seconds * 1000);
+    // Every peer was ready at 30 s, when macOS reported presence.
+    for (const [seedFinished, when] of [
+        [40, "after every peer was ready"],
+        [25, "after it reported presence, before every peer was ready"],
+    ]) {
+        const { code, lines } = await rendezvous(
+            t,
+            [
+                [
+                    plan(),
+                    seed({
+                        created,
+                        readyAt: at(10),
+                        ready: true,
+                        status: "completed",
+                        conclusion: "failure",
+                        completed: at(seedFinished),
+                    }),
+                    joiner("macos", { created, readyAt: at(30), ready: true }),
+                    joiner("windows", {
+                        created,
+                        readyAt: at(20),
+                        ready: true,
+                    }),
+                ],
+            ],
+            ["--machine", "windows", "--arrival-timeout-minutes", "45"]
+        );
+        assert.equal(code, 1);
+        assert.match(
+            errors(lines)[0],
+            new RegExp(
+                `::Seed peer \\(linux\\) finished \\(failure\\) ${when}, so linux cannot take part in the interop$`
+            ),
+            `seed finished at ${seedFinished} s`
+        );
+    }
+});
+
+test("names the peer that finished first, and a job that never got a runner as such", async (t) => {
+    // The seed got a runner 19 minutes after the peer jobs were created.
+    // By then Windows had failed before its presence, at 3 minutes, and
+    // GitHub had cancelled macOS's job, which never got a runner, at 18.8.
+    const created = new Date(Date.now() - 20 * 60_000);
+    const at = (minutes) => new Date(created.getTime() + minutes * 60_000);
+    const { code, lines } = await rendezvous(
+        t,
+        [
+            [
+                plan(),
+                seed({
+                    created,
+                    started: at(19),
+                    readyAt: at(20),
+                    ready: true,
+                }),
+                joiner("macos", {
+                    created,
+                    status: "completed",
+                    conclusion: "cancelled",
+                    runner: false,
+                    completed: at(18.8),
+                }),
+                joiner("windows", {
+                    created,
+                    started: at(1),
+                    status: "completed",
+                    conclusion: "failure",
+                    completed: at(3),
+                }),
+            ],
+        ],
+        ["--arrival-timeout-minutes", "45"]
+    );
+    assert.equal(code, 1);
+    assert.match(
+        errors(lines)[0],
+        /::Join peer \(windows\) finished \(failure\) before it reported presence, so windows cannot take part in the interop; also not ready: macos \(Join peer \(macos\): finished, cancelled, without ever getting a runner\)$/
+    );
+});
+
+test("never names itself as not ready while the listing lags behind its own presence", async (t) => {
+    // Run 44267561179: macOS reported presence at 08:32:32, and its first
+    // listing, a second later, did not show it yet, so it logged that it
+    // was waiting for macos.
+    const lagging = [
+        plan(),
+        seed({ ready: true }),
+        joiner("macos"),
+        joiner("windows", { status: "queued" }),
+    ];
+    const shown = [
+        plan(),
+        seed({ ready: true }),
+        joiner("macos", { ready: true }),
+        joiner("windows", { status: "queued" }),
+    ];
+    const arrived = [
+        plan(),
+        seed({ ready: true }),
+        joiner("macos", { ready: true }),
+        joiner("windows", { ready: true }),
+    ];
+    const { code, lines } = await rendezvous(
+        t,
+        [...Array(4).fill(lagging), ...Array(8).fill(shown), arrived],
+        ["--machine", "macos", "--grace-seconds", "5"]
+    );
+    assert.equal(code, 0);
+    const waits = lines.filter((line) => line.includes(", waiting for "));
+    assert.ok(waits.length >= 1, "reports whom it waits for");
+    for (const line of waits) {
+        assert.match(
+            line,
+            /, waiting for windows \(Join peer \(windows\): queued, waiting for a runner\)$/
+        );
+    }
 });
 
 test("names an earlier attempt when only some jobs were re-run", async (t) => {

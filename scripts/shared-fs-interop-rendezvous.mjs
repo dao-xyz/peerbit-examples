@@ -199,18 +199,60 @@ const duration = (ms) => {
     return `${Math.floor(total / 60)}m${String(total % 60).padStart(2, "0")}s`;
 };
 
+// A job that never got a runner lists neither a runner nor steps, as run
+// 44119409037's macOS job did when GitHub cancelled it 18m46s after it was
+// created.
+const gotRunner = (job) =>
+    Boolean(job.runner_name) || (job.steps ?? []).length > 0;
+
 const describe = (peer) => {
     const { job, machine } = peer;
     if (!job) {
         return `${machine} (no job named "... (${machine})" in this run)`;
     }
     if (job.status === "completed") {
-        return `${machine} (${job.name}: finished, ${job.conclusion ?? "no conclusion"}${peer.earlier ? ", in an earlier run attempt" : ""})`;
+        const how = peer.earlier
+            ? ", in an earlier run attempt"
+            : gotRunner(job)
+              ? ""
+              : ", without ever getting a runner";
+        return `${machine} (${job.name}: finished, ${job.conclusion ?? "no conclusion"}${how})`;
     }
     if (!job.runner_name) {
         return `${machine} (${job.name}: ${job.status}, waiting for a runner)`;
     }
     return `${machine} (${job.name}: ${job.status} on ${job.runner_name}, still setting up)`;
+};
+
+/**
+ * Why `peer`, whose job has finished, cannot take part. `everyoneReadyAt` is
+ * when the last peer reported presence, or NaN while some peer has not.
+ */
+const finishedReason = (peer, everyoneReadyAt, runAttempt) => {
+    const { job, machine } = peer;
+    const conclusion = job.conclusion ?? "no conclusion";
+    if (peer.earlier) {
+        return `${job.name} finished (${conclusion}) in an earlier run attempt, so ${machine} cannot take part in attempt ${runAttempt}: re-run all jobs, not only the failed ones`;
+    }
+    const finishedAt = Date.parse(job.completed_at ?? "");
+    let when;
+    if (!gotRunner(job)) {
+        const queued = finishedAt - Date.parse(job.created_at ?? "");
+        when = `without ever getting a runner${Number.isFinite(queued) ? ` (it was queued for ${duration(queued)})` : ""}`;
+    } else if (!peer.ready) {
+        when = "before it reported presence";
+    } else if (finishedAt >= everyoneReadyAt) {
+        when = "after every peer was ready";
+    } else {
+        when = "after it reported presence, before every peer was ready";
+    }
+    return `${job.name} finished (${conclusion}) ${when}, so ${machine} cannot take part in the interop`;
+};
+
+// When `peer`'s job finished, or Infinity when the listing does not say.
+const finishTime = (peer) => {
+    const time = Date.parse(peer.job?.completed_at ?? "");
+    return Number.isFinite(time) ? time : Infinity;
 };
 
 // Workflow command data must not carry raw newlines or percent signs.
@@ -327,21 +369,32 @@ const main = async () => {
             }
 
             const missing = peers.filter((peer) => !peer.ready);
-            const done = peers.filter(
-                (peer) => peer !== self && peer.job?.status === "completed"
-            );
+            // This job runs after its own presence step, so it never names
+            // itself as not ready, even when the listing, a few seconds
+            // behind, does not show that step yet.
+            const others = missing.filter((peer) => peer !== self);
+            const done = peers
+                .filter(
+                    (peer) => peer !== self && peer.job?.status === "completed"
+                )
+                .sort((a, b) => finishTime(a) - finishTime(b) || 0);
             // Name a peer left over from an earlier attempt first: only a
-            // re-run of all jobs brings it back.
+            // re-run of all jobs brings it back. Otherwise name the peer
+            // that finished first: the others may have given up because of
+            // it.
             const finished = done.find((peer) => peer.earlier) ?? done[0];
             if (finished) {
-                const { job, machine } = finished;
-                const conclusion = job.conclusion ?? "no conclusion";
-                const reason = finished.earlier
-                    ? `${job.name} finished (${conclusion}) in an earlier run attempt, so ${machine} cannot take part in attempt ${runAttempt}: re-run all jobs, not only the failed ones`
-                    : `${job.name} finished (${conclusion}) ${finished.ready ? "after it reported presence, before every peer was ready" : "before it reported presence"}, so ${machine} cannot take part in the interop`;
-                const others = missing.filter((peer) => peer !== finished);
+                const everyoneReadyAt =
+                    missing.length === 0
+                        ? Math.max(
+                              ...peers.map((peer) =>
+                                  Date.parse(peer.ready.completed_at ?? "")
+                              )
+                          )
+                        : NaN;
+                const rest = others.filter((peer) => peer !== finished);
                 fail(
-                    `${reason}${others.length > 0 ? `; also not ready: ${others.map(describe).join("; ")}` : ""}`
+                    `${finishedReason(finished, everyoneReadyAt, runAttempt)}${rest.length > 0 ? `; also not ready: ${rest.map(describe).join("; ")}` : ""}`
                 );
                 return;
             }
@@ -372,7 +425,7 @@ const main = async () => {
             if (now - lastReport >= options.reportMs) {
                 lastReport = now;
                 say(
-                    `${duration(now - since)} after ${sinceLabel}, waiting for ${missing.map(describe).join("; ")}`
+                    `${duration(now - since)} after ${sinceLabel}, waiting for ${others.length > 0 ? others.map(describe).join("; ") : `the listing to show this job's "${options.presenceStep}" step`}`
                 );
             }
         }
@@ -386,9 +439,11 @@ const main = async () => {
                 );
                 return;
             }
-            const missing = lastPeers.filter((peer) => !peer.ready);
+            const others = lastPeers.filter(
+                (peer) => !peer.ready && peer.machine !== options.machine
+            );
             fail(
-                `not every peer was ready ${budget} after ${sinceLabel}; not ready: ${missing.map(describe).join("; ")}. A hosted runner can queue for a long time (macOS arm64 under capacity constraints): re-run the workflow, or raise arrival_timeout_minutes in a manual run${lastError ? `. The last jobs listing failed: ${lastError.message}` : ""}`
+                `not every peer was ready ${budget} after ${sinceLabel}; not ready: ${others.length > 0 ? others.map(describe).join("; ") : `none but this job, whose "${options.presenceStep}" step the listing did not show yet`}. A hosted runner can queue for a long time (macOS arm64 under capacity constraints): re-run the workflow, or raise arrival_timeout_minutes in a manual run${lastError ? `. The last jobs listing failed: ${lastError.message}` : ""}`
             );
             return;
         }
