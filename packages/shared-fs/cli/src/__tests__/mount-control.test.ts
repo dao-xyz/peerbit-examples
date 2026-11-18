@@ -82,6 +82,9 @@ const deferred = () => {
     return { promise, resolve };
 };
 
+/** Runs what promises that settled scheduled. */
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
 /** A state directory whose socket path fits a socket address. */
 const stateDirectory = () => fsp.mkdtemp(path.join(os.tmpdir(), "pbfs-"));
 
@@ -590,6 +593,55 @@ describe("mount control endpoint", () => {
         }
     });
 
+    it("lets a stop wait for a command that began its change also once its client went away", async () => {
+        const directory = await stateDirectory();
+        const changing = deferred();
+        const held = deferred();
+        let aborted!: (reason: unknown) => void;
+        const clientGone = new Promise<unknown>(
+            (resolve) => (aborted = resolve)
+        );
+        const events: string[] = [];
+        const control = await startMountControl({
+            directory,
+            cliVersion: CLI,
+            // As a gc that its client's Ctrl-C ends once its change began:
+            // the change goes on.
+            handle: async (_request, _print, signal, beginChange) => {
+                beginChange();
+                signal.addEventListener("abort", () => aborted(signal.reason));
+                changing.resolve();
+                await held.promise;
+                events.push("changed");
+                return 0;
+            },
+        });
+        const client = net.createConnection(control.endpoint!);
+        client.on("error", ignore);
+        try {
+            client.write(requestLine(readMountControl(directory)!, "gc"));
+            await within(changing.promise, "gc begins its change");
+            client.destroy();
+            expect(
+                await within(clientGone, "the mount sees its client go")
+            ).toEqual(new Error("the control connection closed"));
+            const stopping = control.stopServing().then(() => {
+                events.push("stopped");
+            });
+            await settle();
+            // Not while gc changes the filesystem.
+            expect(events).toEqual([]);
+            held.resolve();
+            await within(stopping, "the stop has waited");
+            expect(events).toEqual(["changed", "stopped"]);
+        } finally {
+            held.resolve();
+            client.destroy();
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
     it("lets a stop wait only so long for a command that began its change, then cuts it off", async () => {
         expect(MOUNT_CONTROL_LIMITS.stopWaitMs).toBe(10_000);
         const directory = await stateDirectory();
@@ -1057,9 +1109,6 @@ describe("a command a mount serves, on a stand-in for its filesystem", () => {
             if (signal.aborted) resolve();
             else signal.addEventListener("abort", () => resolve());
         });
-
-    /** Runs what promises that settled scheduled. */
-    const settle = () => new Promise((resolve) => setImmediate(resolve));
 
     const resolution = { writeReadyTimeoutMs: 120_000, assumeComplete: false };
 

@@ -27,6 +27,6 @@ while it starts (exit 130); the next `mount` replaces what a killed one left.
 A request is one line of JSON of at most 1 MiB, due within 30 s of
 connecting, with a protocol version, and the mount refuses another
 peerbit-fs version. A stopping mount refuses new requests and waits up to
-10 s for a command that has begun to change the filesystem, so that the
-change is done before Peerbit stops and persist-on-exit waits for the
-filesystem entries it wrote. No storage format changes.
+10 s for a change a command has begun, also once Ctrl-C ended the command,
+so that the change is done before Peerbit stops and persist-on-exit waits
+for the filesystem entries it wrote. No storage format changes.

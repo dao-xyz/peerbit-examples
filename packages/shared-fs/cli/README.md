@@ -688,8 +688,9 @@ one the mount serves. Ctrl-C on such a command ends its request: a wait for
 write readiness ends with it, and a change that already started completes.
 A stopping mount refuses commands from the start of its stop and cuts off
 those under way that have not begun to change the filesystem. It waits up to
-10 s for one that has: its change is then done before the mount detaches and
-Peerbit stops, it prints its result, and persist-on-exit, which comes later,
+10 s for the changes that have begun, also one whose command Ctrl-C ended:
+each is then done before the mount detaches and Peerbit stops, its command,
+if still running, prints its result, and persist-on-exit, which comes later,
 waits for the filesystem entries it wrote too (not trust edges). Then the
 stop goes on and cuts off a command still running.
 

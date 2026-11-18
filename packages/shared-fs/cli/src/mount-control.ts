@@ -120,7 +120,8 @@ export class MountControlRefusal extends Error {}
  * `signal` aborts once the client went away or the mount began to stop.
  * The handler calls `beginChange()` just before it changes the filesystem:
  * it throws once `signal` aborted, and from then on a stop waits for the
- * request (up to its limit) instead of cutting it off.
+ * request (up to its limit) instead of cutting it off, also once its client
+ * went away.
  */
 export type MountControlHandler = (
     request: Pick<MountControlRequest, "command" | "argv" | "output">,
@@ -469,8 +470,9 @@ export type MountControl = {
     failure?: string;
     /**
      * Refuses new requests ("it is stopping") and cuts off those that have
-     * not begun a change. Resolves once those that have are answered, or
-     * once the stop's wait is over; it then cuts them off too.
+     * not begun a change. Resolves once those that have are done, also
+     * those whose client went away, or once the stop's wait is over; it
+     * then cuts them off too.
      */
     stopServing(): Promise<void>;
     /**
@@ -483,9 +485,10 @@ export type MountControl = {
 /** A connection's request, as a stop sees it. */
 type Served = {
     abort: AbortController;
-    /** It began a change: a stop waits for it. */
-    changing: boolean;
-    /** Its answer is sent, or the connection was refused. */
+    /**
+     * It was refused or its handler is done, and a client still connected
+     * has its answer.
+     */
     answered: boolean;
     /** Settles once it is answered; from when its request line arrived. */
     answering?: Promise<void>;
@@ -511,6 +514,12 @@ export const startMountControl = async (options: {
     const token = randomBytes(32).toString("base64url");
     const tokenDigest = sha256(token);
     const connections = new Map<net.Socket, Served>();
+    /**
+     * The requests that began a change, until they are answered: a stop
+     * waits for them, also for one whose connection closed, since its
+     * change goes on without its client.
+     */
+    const changes = new Set<Served>();
     let stopping = false;
 
     /** Ends a request: its signal aborts at once, before any change. */
@@ -522,7 +531,6 @@ export const startMountControl = async (options: {
     const serve = (socket: net.Socket) => {
         const served: Served = {
             abort: new AbortController(),
-            changing: false,
             answered: false,
         };
         connections.set(socket, served);
@@ -539,13 +547,14 @@ export const startMountControl = async (options: {
         };
         const finish = (message: MountControlResponse) => {
             served.answered = true;
+            changes.delete(served);
             send(message);
             socket.end();
         };
         const refuse = (reason: string) => finish({ type: "refused", reason });
         const beginChange = () => {
             served.abort.signal.throwIfAborted();
-            served.changing = true;
+            changes.add(served);
         };
         const answer = async (line: string) => {
             let request: Partial<MountControlRequest>;
@@ -663,17 +672,20 @@ export const startMountControl = async (options: {
 
     const stopServing = async () => {
         stopping = true;
-        const changes: Promise<void>[] = [];
         for (const [socket, served] of connections) {
-            if (served.changing) changes.push(served.answering!);
-            else if (!served.answered) {
+            if (!served.answered && !changes.has(served)) {
                 cutOff(socket, served, "the mount is stopping");
             }
         }
-        if (changes.length > 0) {
+        // From here on no other request can begin a change: new ones are
+        // refused, and the signal of every other one under way has aborted.
+        if (changes.size > 0) {
             let timer: ReturnType<typeof setTimeout> | undefined;
             await Promise.race([
-                Promise.allSettled(changes),
+                Promise.allSettled(
+                    // Set in the turn its handler began, so set by now.
+                    [...changes].map((served) => served.answering!)
+                ),
                 new Promise<void>((resolve) => {
                     timer = setTimeout(resolve, limits.stopWaitMs);
                 }),
