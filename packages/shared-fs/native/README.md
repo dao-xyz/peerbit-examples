@@ -427,6 +427,11 @@ mtime on every file version. The adapter maps the POSIX calls onto them:
   regular file finds an exec bit, so `test -x` agrees with `execve`. It does
   not check read or write masks. Modes and owners are not an authorization
   boundary; use Shared FS trusted-writer authorization for write access.
+- Paths the mount keeps on this machine (everything at or below a
+  `node_modules` directory; see the CLI README, "Install dependencies in a
+  mount") are ordinary host files: `chmod` keeps every permission bit, the
+  create mode applies with the umask, `utimens` sets the time of any entry,
+  a symlink's own included, and directories report the host's times.
 
 Per platform:
 
@@ -486,12 +491,12 @@ A failed call returns the errno of the error name the daemon sent (`ENOENT`,
 `EEXIST`, `EACCES` and so on); a name the adapter does not know becomes `EIO`,
 and so does a failure with no name. These names reach callers too:
 
-| Name     | When                                                                   | Linux | macOS | Windows: errno -> WinFsp NTSTATUS -> Win32 -> Node                 |
-| -------- | ---------------------------------------------------------------------- | ----- | ----- | ------------------------------------------------------------------ |
-| `EXDEV`  | a rename the mount cannot make in place, such as across an ignore rule | 18    | 18    | 18 -> `STATUS_NOT_SAME_DEVICE` -> `ERROR_NOT_SAME_DEVICE` -> EXDEV |
-| `ENOSPC` | the disk under the daemon's store is full                              | 28    | 28    | 28 -> `STATUS_DISK_FULL` -> `ERROR_DISK_FULL` -> ENOSPC            |
-| `EPERM`  | the host refused the operation                                         | 1     | 1     | 1 -> `STATUS_ACCESS_DENIED` -> `ERROR_ACCESS_DENIED` -> EPERM      |
-| `EDQUOT` | a disk quota under the daemon's store is exhausted                     | 122   | 69    | sent as ENOSPC (Windows has no quota errno): 28 -> ENOSPC          |
+| Name     | When                                                                                                                | Linux | macOS | Windows: errno -> WinFsp NTSTATUS -> Win32 -> Node                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------- | ----- | ----- | ------------------------------------------------------------------ |
+| `EXDEV`  | a rename the mount cannot make in place: between `node_modules` and the rest of the mount, or across an ignore rule | 18    | 18    | 18 -> `STATUS_NOT_SAME_DEVICE` -> `ERROR_NOT_SAME_DEVICE` -> EXDEV |
+| `ENOSPC` | the disk under the daemon's store or under `node_modules` is full                                                   | 28    | 28    | 28 -> `STATUS_DISK_FULL` -> `ERROR_DISK_FULL` -> ENOSPC            |
+| `EPERM`  | the host refused the operation                                                                                      | 1     | 1     | 1 -> `STATUS_ACCESS_DENIED` -> `ERROR_ACCESS_DENIED` -> EPERM      |
+| `EDQUOT` | a disk quota there is exhausted                                                                                     | 122   | 69    | sent as ENOSPC (Windows has no quota errno): 28 -> ENOSPC          |
 
 `mv`, file managers and most copy tools handle `EXDEV` by copying and
 deleting. On Windows `EACCES` also becomes `STATUS_ACCESS_DENIED`, so Node
