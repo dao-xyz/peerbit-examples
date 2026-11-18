@@ -11,9 +11,10 @@ with ordinary POSIX behaviour, including permission bits, times, truncate,
 renames inside it, unlink and rmdir. Nothing there is written to the shared
 log or the block store, waited for by `persistLocalWrites()` or shown in
 conflicts, and it is kept across remounts of the same directory. A shared
-entry with such a name is hidden in the mount (it stays in the store), a
-rename between local and shared paths fails with `EXDEV`, and a shared
-directory holding local entries cannot be removed or replaced (`ENOTEMPTY`).
+entry with such a name is hidden in the mount (it stays in the store and
+keeps its directory from being removed there), a rename between local and
+shared paths fails with `EXDEV`, and a shared directory holding local entries
+cannot be removed or replaced (`ENOTEMPTY`).
 The mount backend gains the error codes `EXDEV`, `ENOSPC`, `EPERM` and
 `EDQUOT`: a rename across an ignore boundary now fails with `EXDEV` instead
 of `EACCES`, and a full or over-quota disk under the store reports `ENOSPC`

@@ -592,10 +592,15 @@ deleted when the mount stops.
   mount fails with `EXDEV`, which `mv` and file managers handle by copying:
   `mv node_modules node_modules.bak` copies the tree into the shared
   filesystem and publishes it.
-- A directory holding a `node_modules` cannot be removed or renamed over
-  (`ENOTEMPTY`) until `node_modules` is gone; `rm -r` removes it first.
+- A directory holding this machine's `node_modules` cannot be removed or
+  renamed over (`ENOTEMPTY`) until `node_modules` is gone; `rm -r` removes
+  it first.
 - Another machine's file or symlink named `node_modules` is not shown in a
-  mount; `peerbit-fs` commands and the library still read it.
+  mount; `peerbit-fs` commands and the library still read it. It still
+  keeps its directory from being removed: `rmdir` and `rm -r` fail with
+  `ENOTEMPTY` though the directory looks empty. No mount shows it, so remove
+  it with the library (`rm()`), or rename the directory, which takes it
+  along.
 - When another machine deletes a directory holding a `node_modules`, the
   local entries stay on disk, hidden, and `mount` says how many such
   directories it found:

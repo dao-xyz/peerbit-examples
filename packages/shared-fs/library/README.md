@@ -1550,7 +1550,10 @@ in `/.peerbit-conflicts`, and none of it reaches another replica.
 
 - A shared entry at a local path, such as another peer's file named
   `node_modules`, is hidden in the mount. It stays in the store, in `list()`
-  and `readFile()`, and on other peers.
+  and `readFile()`, and on other peers. It is still an entry of its
+  directory: `rmdir` of that directory fails with `ENOTEMPTY` though the
+  mount lists it as empty, until `rm()` on a handle that does not ignore
+  the path removes the entry. Renaming the directory takes the entry along.
 - A rename between a local and a shared path fails with `EXDEV` (`ENOENT`
   for a missing source) and changes nothing; `mv` and file managers then
   copy instead, so `mv node_modules node_modules.bak` copies the tree into

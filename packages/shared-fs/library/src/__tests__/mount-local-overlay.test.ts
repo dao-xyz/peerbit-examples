@@ -565,6 +565,29 @@ describe("mount local overlay", () => {
         expect(await fs.stat("/q")).toMatchObject({ kind: "directory" });
     });
 
+    it("keeps a directory holding a hidden shared entry until the library removes it", async () => {
+        const { backend } = await mount();
+        await fs.mkdir("/p");
+        await fs.writeFile("/p/node_modules", "shared bytes");
+        // Listed as empty, yet not empty: rmdir fails.
+        expect(await names(backend, "/p")).toEqual([]);
+        await expect(backend.rmdir("/p")).rejects.toMatchObject({
+            code: "ENOTEMPTY",
+        });
+        // A rename takes the hidden entry along.
+        await backend.rename("/p", "/p.old");
+        expect(await fs.stat("/p")).toBeUndefined();
+        expect((await fs.list("/p.old")).map((entry) => entry.name)).toEqual([
+            "node_modules",
+        ]);
+        await expect(backend.rmdir("/p.old")).rejects.toMatchObject({
+            code: "ENOTEMPTY",
+        });
+        await fs.rm("/p.old/node_modules");
+        await backend.rmdir("/p.old");
+        expect(await fs.stat("/p.old")).toBeUndefined();
+    });
+
     it("follows its directory through the mount's own rename and another writer's", async () => {
         const { backend } = await mount();
         await backend.mkdir("/p");
