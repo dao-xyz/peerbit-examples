@@ -1305,14 +1305,17 @@ const NEGATIVE_NUMBER = /^-([0-9]+(\.[0-9]+)?|\.[0-9]+)$/;
  * `conflicts --fail-if-any=1` turned its CI gate off. `booleans` maps each
  * boolean option of the command to the aliases yargs parsed for it.
  *
- * As yargs reads --<name>=<value>, a <name> with a hyphen also sets the
- * camelCase of <name> (--fail-If-any=1 sets failIfAny) and keeps the value
- * as given there: a spelling the option reaches only that way takes no value
- * at all, and neither does --no-<option>=<value>, which yargs does not read
- * as the option. A dotted <name> sets the option its first segment names to
- * an object, which reads as on (--assume-complete.x=0 and
- * --no-assume-complete.x both turn the override on), so it is refused in
- * every form, with the next argument where yargs takes that as its value.
+ * yargs also reads names that are not a spelling of the option as the
+ * option, and keeps the value as given there. A <name> with a hyphen sets
+ * the camelCase of <name> (--fail-If-any=false and --fail-If-any false set
+ * failIfAny to "false", which reads as on): a spelling the option reaches
+ * only that way takes no value at all, with = or as the next argument. A
+ * dotted <name> sets the option its first segment names to an object, which
+ * reads as on (--assume-complete.x=0 and --no-assume-complete.x both turn
+ * the override on), so it is refused in every form. Nor does
+ * --no-<option>=<value>, which yargs does not read as the option, take a
+ * value. Where yargs takes the next argument as the value, the refusal
+ * quotes it too.
  */
 const valuedBooleanFlagRefusal = (
     args: readonly string[],
@@ -1349,8 +1352,14 @@ const valuedBooleanFlagRefusal = (
             next !== undefined &&
             (!next.startsWith("-") || NEGATIVE_NUMBER.test(next));
         if (fields.length === 0) {
-            if (assignment === undefined) continue;
-            if (spellings.has(name) && /^=(true|false)$/.test(assignment)) {
+            if (assignment === undefined) {
+                // A spelling or a negation reads as a boolean, and so does
+                // another name while yargs takes no value for it.
+                if (negated || spellings.has(name) || !taken) continue;
+            } else if (
+                spellings.has(name) &&
+                /^=(true|false)$/.test(assignment)
+            ) {
                 continue;
             }
         }

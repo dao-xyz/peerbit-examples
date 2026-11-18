@@ -5,10 +5,11 @@ import { createCliParser } from "../index.js";
  * A boolean option given a value. yargs read every value but true or false
  * as false: `conflicts --fail-if-any=1` turned the CI gate off and
  * `mount --persistOnExit=30000` skipped the shutdown wait. A dotted name made
- * the option an object, which reads as on: `mount --assume-complete.x=0`
- * turned the override on. The table covers every boolean option of every
- * command, as yargs knows them for the command being parsed, in each
- * spelling yargs reads as the option.
+ * the option an object, and a camel-cased spelling kept the value as given,
+ * both of which read as on: `mount --assume-complete.x=0` and
+ * `mount --assume-Complete false` turned the override on. The table covers
+ * every boolean option of every command, as yargs knows them for the command
+ * being parsed, in each spelling yargs reads as the option.
  */
 
 const STOP = new Error("stopped before the command handler");
@@ -228,8 +229,27 @@ const tableOf = (command: Command) => {
             const mixed = `--${mixedCase(option)}`;
             for (const value of [...REFUSED, "true", "false"]) {
                 refused(mixed, value);
+                // yargs takes the next argument as its value as well.
+                refusedAs([mixed, value], `${mixed} ${value}`, mixed);
             }
+            refusedAs([mixed, "-1"], `${mixed} -1`, mixed);
             dotted([`${mixed}.x=0`], `${mixed}.x=0`, mixed);
+            // Without a value, it and its negation read as before, under
+            // the name and the option's camelCase.
+            const keys = [mixedCase(option), ...spellings.slice(1)];
+            const reads = (given: string[], value: boolean) =>
+                rows.push({
+                    args: [...base, ...given],
+                    keys,
+                    outcome: {
+                        argv: Object.fromEntries(
+                            keys.map((key) => [key, value])
+                        ),
+                    },
+                });
+            reads([mixed], true);
+            reads([mixed, "--"], true);
+            reads([`--no-${mixedCase(option)}`], false);
         }
     }
     // Options that are not boolean keep their values.
