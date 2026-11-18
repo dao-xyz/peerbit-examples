@@ -187,6 +187,7 @@ const rendezvous = async (t, responses, args = [], env = {}) => {
         ["--report-seconds", "0.25"],
         ["--grace-seconds", "0.6"],
         ["--arrival-timeout-minutes", "0.1"],
+        ["--settle-seconds", "0.2"],
     ]);
     for (let index = 0; index < args.length; index += 2) {
         options.set(args[index], args[index + 1]);
@@ -763,6 +764,132 @@ test("counts the arrival budget from when the peer jobs were created", async (t)
     assert.equal(code, 1);
     assert.equal(calls.length, 1, "the budget was already spent");
     assert.match(errors(lines)[0], /not every peer was ready 0m30s after/);
+});
+
+test("meets a peer that reported presence by the deadline but is listed after it", async (t) => {
+    // The deadline (6 s after creation) passed half a second ago. macOS
+    // completed its presence step a second before it, but the first two
+    // listings do not show that yet.
+    const created = new Date(Date.now() - 6_500);
+    const deadline = new Date(created.getTime() + 6_000);
+    const lagging = [
+        plan(),
+        seed({ created, ready: true }),
+        joiner("macos", { created }),
+        joiner("windows", { created, ready: true }),
+    ];
+    const shown = [
+        plan(),
+        seed({ created, ready: true }),
+        joiner("macos", {
+            created,
+            ready: true,
+            readyAt: new Date(deadline.getTime() - 1_000),
+        }),
+        joiner("windows", { created, ready: true }),
+    ];
+    const { code, lines, calls } = await rendezvous(
+        t,
+        [lagging, lagging, shown],
+        ["--settle-seconds", "5"]
+    );
+    assert.equal(code, 0);
+    assert.equal(calls.length, 3);
+    assert.deepEqual(errors(lines), []);
+    assert.ok(
+        lines.some((line) =>
+            line.endsWith(
+                "] macos is ready (Join peer (macos), 0m05s after the peer jobs were created)"
+            )
+        )
+    );
+    assert.match(lines.at(-1), /every peer is ready/);
+});
+
+test("fails at once when a peer reported presence after the deadline", async (t) => {
+    // Every peer reads the same step time, so each fails, whenever it lists.
+    const created = new Date(Date.now() - 10_000);
+    const deadline = new Date(created.getTime() + 6_000);
+    for (const machine of ["linux", "macos"]) {
+        const { code, lines, calls } = await rendezvous(
+            t,
+            [
+                [
+                    plan(),
+                    seed({ created, ready: true }),
+                    joiner("macos", {
+                        created,
+                        ready: true,
+                        readyAt: new Date(deadline.getTime() + 2_000),
+                    }),
+                    joiner("windows", { created, ready: true }),
+                ],
+            ],
+            ["--machine", machine, "--settle-seconds", "60"]
+        );
+        assert.equal(code, 1, machine);
+        assert.equal(calls.length, 1, machine);
+        assert.match(
+            errors(lines)[0],
+            new RegExp(
+                `::${machine === "macos" ? "this job" : "macos"} \\(Join peer \\(macos\\)\\) reported presence 0m02s after the arrival deadline, 0m06s after the peer jobs were created, so no peer starts the interop\\. `
+            ),
+            machine
+        );
+        assert.ok(
+            !lines.some((line) => line.includes("] macos is ready (")),
+            "a late presence does not count"
+        );
+    }
+});
+
+test("gives up the settle period after the deadline, naming who is missing", async (t) => {
+    // The deadline comes a second after the wait starts.
+    const created = new Date(Date.now() - 5_000);
+    const { code, lines, elapsedMs } = await rendezvous(
+        t,
+        [
+            [
+                plan(),
+                seed({ created, ready: true }),
+                joiner("macos", { created, status: "queued" }),
+                joiner("windows", { created, ready: true }),
+            ],
+        ],
+        ["--settle-seconds", "1.5"]
+    );
+    assert.equal(code, 1);
+    assert.ok(elapsedMs >= 2_000, `gave up after ${elapsedMs} ms`);
+    assert.match(
+        errors(lines)[0],
+        /::not every peer was ready 0m06s after the peer jobs were created; not ready: macos \(Join peer \(macos\): queued, waiting for a runner\)\. /
+    );
+});
+
+test("counts every peer's deadline from the earliest peer job's creation", async (t) => {
+    // Were the seed to count from its own job, created 2 s after the
+    // others, macOS's presence at 7 s would be in time for it alone.
+    const created = new Date(Date.now() - 10_000);
+    const { code, lines } = await rendezvous(t, [
+        [
+            plan(),
+            seed({
+                created: new Date(created.getTime() + 2_000),
+                ready: true,
+            }),
+            joiner("macos", {
+                created,
+                ready: true,
+                readyAt: new Date(created.getTime() + 7_000),
+            }),
+            joiner("windows", { created, ready: true }),
+        ],
+    ]);
+    assert.equal(code, 1);
+    assert.match(
+        errors(lines)[0],
+        /::macos \(Join peer \(macos\)\) reported presence 0m01s after the arrival deadline/
+    );
 });
 
 test("retries when listing the jobs fails", async (t) => {

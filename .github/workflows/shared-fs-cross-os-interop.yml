@@ -12,9 +12,13 @@ name: Shared FS Cross-OS Interop
 # and publish the address, and the joiners join: every peer's window starts
 # once all of them have a runner. The wait fails at once when another peer's
 # job has finished (it failed, was cancelled, never got a runner, or a re-run
-# left it out: re-run all jobs, not only the failed ones), and when
-# INTEROP_ARRIVAL_TIMEOUT_MINUTES have passed since the peer jobs were
-# created. It finds a peer's job by the "(<machine>)" that ends its name.
+# left it out: re-run all jobs, not only the failed ones). A peer counts only
+# if its presence step completed within INTEROP_ARRIVAL_TIMEOUT_MINUTES of
+# when the peer jobs were created, by the step's own time. Every peer reads
+# the same times, and waits up to a minute past that deadline for the listing
+# (a few seconds behind) to show them, so every peer reaches the same
+# decision unless the listing falls further behind. It finds a peer's job by
+# the "(<machine>)" that ends its name.
 # The plan job sizes the peer jobs' time limit to hold the arrival budget as
 # well as the interop, so a late peer never finds another's job at its limit.
 on:
@@ -137,15 +141,16 @@ jobs:
                   build=5
                   # A peer job's limit adds up checkout and tool setup (5),
                   # install and build, the wait for every peer (the arrival
-                  # budget), the seed's start or a joiner's address download
-                  # (15; step limits cap both), the interop (the join step's
-                  # limit; the seed stops waiting a window + 5 after its
-                  # start) and teardown (5). The arrival budget counts from
-                  # when the peer jobs were created, so it already holds a
-                  # job's own queue, setup and build: no peer's job reaches its
-                  # limit while a peer that arrived within the budget can still
-                  # need it.
-                  peer_job=$((5 + install + build + arrival + 15 + join_step + 5))
+                  # budget, and the minute past its deadline in which the
+                  # peers wait for the listing to show presence from before
+                  # it), the seed's start or a joiner's address download (15;
+                  # step limits cap both), the interop (the join step's limit;
+                  # the seed stops waiting a window + 5 after its start) and
+                  # teardown (5). The arrival budget counts from when the peer
+                  # jobs were created, so it already holds a job's own queue,
+                  # setup and build: no peer's job reaches its limit while a
+                  # peer that arrived within the budget can still need it.
+                  peer_job=$((5 + install + build + arrival + 1 + 15 + join_step + 5))
                   if [ "$peer_job" -gt 360 ]; then
                     echo "::error::A peer job would need up to ${peer_job} minutes, past the 360 a hosted job may run: lower timeout_minutes or arrival_timeout_minutes"
                     exit 1

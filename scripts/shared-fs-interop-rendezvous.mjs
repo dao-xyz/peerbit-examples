@@ -11,15 +11,26 @@
 //
 // The script polls this run's jobs (gh api .../actions/runs/<id>/jobs, which
 // needs `actions: read`). A peer's job is the one whose name ends in
-// "(<machine>)". The script fails:
+// "(<machine>)".
+//
+// Every peer applies the same arrival deadline, --arrival-timeout-minutes
+// after the peer jobs were created, to the same times: a peer counts as
+// ready only if its presence step completed by the deadline, by that step's
+// own completion time. The listing shows a completed step a few seconds
+// late, so a peer waits up to --settle-seconds past the deadline for steps
+// that completed by then. Every peer thus reaches the same decision, unless
+// the listing lags by more than that.
+//
+// The script fails:
 // - at once, when another peer's job has already finished: that peer can no
 //   longer take part. A re-run of only some jobs lists each job it did not
 //   re-run as finished, under the new attempt's number and creation time but
 //   with the times and steps of the attempt that ran it. Such a job finished
 //   before this one was created, and the script asks for a re-run of all
 //   jobs;
-// - when the arrival budget runs out, counted from when the peer jobs were
-//   created, naming the peers that are not ready;
+// - at once, when a peer completed its presence step after the deadline;
+// - --settle-seconds after the deadline, when a peer has still not completed
+//   its presence step, naming the peers that are not ready;
 // - at once, when listing the jobs fails in a way that a retry cannot fix:
 //   HTTP 401, 403 other than a rate limit, 404, or gh without a token.
 //   Other failed listings (network errors, timeouts, HTTP 5xx and 429, rate
@@ -36,8 +47,8 @@
 // Usage:
 //   node scripts/shared-fs-interop-rendezvous.mjs --machine <machine>
 //     --expected <machine,...> [--arrival-timeout-minutes 45]
-//     [--poll-seconds 10] [--slow-poll-seconds 30] [--slow-after-seconds 180]
-//     [--report-seconds 60] [--grace-seconds 120]
+//     [--settle-seconds 60] [--poll-seconds 10] [--slow-poll-seconds 30]
+//     [--slow-after-seconds 180] [--report-seconds 60] [--grace-seconds 120]
 //     [--presence-step "Report interop presence"]
 // Reads GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT; gh reads
 // GH_TOKEN.
@@ -81,6 +92,7 @@ const parseArgs = (args) => {
         machine,
         expected,
         arrivalMs: seconds("--arrival-timeout-minutes", 45, 60),
+        settleMs: seconds("--settle-seconds", 60),
         pollMs: seconds("--poll-seconds", 10),
         slowPollMs: seconds("--slow-poll-seconds", 30),
         slowAfterMs: seconds("--slow-after-seconds", 180),
@@ -283,9 +295,10 @@ const main = async () => {
     };
 
     const startedAt = Date.now();
-    // The arrival budget counts from when the peer jobs were created (this
-    // job's created_at), so every peer gives up at the same moment. Until a
-    // listing shows it, count from now.
+    // The arrival budget counts from when the peer jobs were created: the
+    // earliest created_at among them (an attempt creates them together), so
+    // that every peer has the same deadline. Until a listing shows them,
+    // count from now.
     let since = startedAt;
     let sinceLabel = "this step started";
     let lastPeers;
@@ -330,10 +343,14 @@ const main = async () => {
         if (peers) {
             const self = peers.find((peer) => peer.machine === options.machine);
             const created = Date.parse(self.job?.created_at ?? "");
-            if (Number.isFinite(created)) {
-                since = created;
+            const creations = peers
+                .map((peer) => Date.parse(peer.job?.created_at ?? ""))
+                .filter(Number.isFinite);
+            if (creations.length > 0) {
+                since = Math.min(...creations);
                 sinceLabel = "the peer jobs were created";
             }
+            const deadline = since + options.arrivalMs;
             for (const peer of peers) {
                 // A job that finished before this one was created ran in an
                 // earlier attempt: a re-run of only some jobs lists it again,
@@ -347,6 +364,11 @@ const main = async () => {
                     peer.job && !peer.earlier
                         ? presenceOf(peer.job, options.presenceStep)
                         : undefined;
+                // A presence step that completed after the deadline does not
+                // count, for this peer or any other.
+                peer.late =
+                    Boolean(peer.ready) &&
+                    Date.parse(peer.ready.completed_at ?? "") > deadline;
             }
             lastPeers = peers;
 
@@ -359,7 +381,7 @@ const main = async () => {
             }
 
             for (const peer of peers) {
-                if (peer.ready && !announced.has(peer.machine)) {
+                if (peer.ready && !peer.late && !announced.has(peer.machine)) {
                     announced.add(peer.machine);
                     const readyAt = Date.parse(peer.ready.completed_at ?? "");
                     say(
@@ -385,7 +407,7 @@ const main = async () => {
             const finished = done.find((peer) => peer.earlier) ?? done[0];
             if (finished) {
                 const everyoneReadyAt =
-                    missing.length === 0
+                    missing.length === 0 && !peers.some((peer) => peer.late)
                         ? Math.max(
                               ...peers.map((peer) =>
                                   Date.parse(peer.ready.completed_at ?? "")
@@ -395,6 +417,18 @@ const main = async () => {
                 const rest = others.filter((peer) => peer !== finished);
                 fail(
                     `${finishedReason(finished, everyoneReadyAt, runAttempt)}${rest.length > 0 ? `; also not ready: ${rest.map(describe).join("; ")}` : ""}`
+                );
+                return;
+            }
+
+            const late = peers.filter((peer) => peer.late);
+            if (late.length > 0) {
+                const reports = late.map(
+                    (peer) =>
+                        `${peer === self ? "this job" : peer.machine} (${peer.job.name}) reported presence ${duration(Date.parse(peer.ready.completed_at) - deadline)} after the arrival deadline`
+                );
+                fail(
+                    `${reports.join("; ")}, ${duration(options.arrivalMs)} after ${sinceLabel}, so no peer starts the interop. A hosted runner can queue for a long time (macOS arm64 under capacity constraints): re-run the workflow, or raise arrival_timeout_minutes in a manual run`
                 );
                 return;
             }
@@ -430,8 +464,10 @@ const main = async () => {
             }
         }
 
-        const deadline = since + options.arrivalMs;
-        if (now >= deadline) {
+        // Past the deadline, a peer waits for the listing to show presence
+        // steps that completed by then, and gives up after --settle-seconds.
+        const giveUpAt = since + options.arrivalMs + options.settleMs;
+        if (now >= giveUpAt) {
             const budget = duration(options.arrivalMs);
             if (!lastPeers) {
                 fail(
@@ -458,7 +494,7 @@ const main = async () => {
                 resolve,
                 Math.min(
                     slowed ? options.slowPollMs : options.pollMs,
-                    deadline - now
+                    giveUpAt - now
                 )
             )
         );
