@@ -23,7 +23,8 @@
  * Session 1 runs the adapter with debug output, which logs each FUSE
  * operation and its result. A failure prints the error's code, errno,
  * syscall and path, and for the last session and any still running whether
- * its mountpoint is mounted and the end of its output.
+ * its mountpoint is mounted then and, once cleanup stopped it, the end of its
+ * output.
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -527,9 +528,9 @@ const errorFields = (error) => {
 };
 
 /**
- * Log what a failure leaves to read: the error's fields and, for the last
- * session and any still running, whether its mountpoint is mounted (looked
- * at once) and the end of its output, the adapter's debug lines included.
+ * Log what a failure leaves to read at once: the error's fields and, for the
+ * last session and any still running, whether it runs and its mountpoint is
+ * mounted (looked at once). Returns those sessions for describeOutput.
  */
 const describeFailure = (error) => {
     const fields = errorFields(error);
@@ -552,14 +553,31 @@ const describeFailure = (error) => {
         log(
             `session ${session.number} (${state}): ${session.mountpoint} is ${mounted} at the failure, ${since}`
         );
+    }
+    return { fields, sessions: [...described] };
+};
+
+/**
+ * Log the end of each session's output once the session closed it: the lines
+ * a mount writes about the failing operation, such as the adapter's debug
+ * line for it, can reach this process after the failure.
+ */
+const describeOutput = async (described) => {
+    for (const session of described) {
+        await within(
+            session.closed,
+            30_000,
+            `session ${session.number} closes its output`
+        ).catch((error) => log(`cleanup: ${error.message}`));
+        const exit = session.child.exitCode ?? session.child.signalCode;
+        const state = exit === null ? "still running" : `exited ${exit}`;
         log(
-            `session ${session.number} stdout, last 4000 characters:\n${session.stdout.slice(-4000)}`
+            `session ${session.number} (${state}) stdout, last 4000 characters:\n${session.stdout.slice(-4000)}`
         );
         log(
-            `session ${session.number} stderr, last 8000 characters:\n${session.stderr.slice(-8000)}`
+            `session ${session.number} (${state}) stderr, last 8000 characters:\n${session.stderr.slice(-8000)}`
         );
     }
-    return fields;
 };
 
 // ---- the run -------------------------------------------------------------
@@ -600,6 +618,8 @@ const main = async () => {
         throw new SmokeFailure("no free drive letter from P to Z");
     };
     let witness;
+    /** The sessions a failure names, whose output cleanup prints. */
+    let described = [];
     const result = { platform: process.platform, node: process.version };
     try {
         result.fixture = await step("generate the npm fixture", () =>
@@ -886,11 +906,14 @@ const main = async () => {
     } catch (error) {
         result.ok = false;
         result.error = String(error?.stack ?? error);
-        result.errorFields = describeFailure(error);
+        const failure = describeFailure(error);
+        result.errorFields = failure.fields;
+        described = failure.sessions;
         throw error;
     } finally {
         for (const session of [...sessions]) await forceStop(session);
         for (const mountpoint of mountpoints) unmountSync(mountpoint);
+        await describeOutput(described);
         if (witness) {
             await within(
                 witness.close(),
