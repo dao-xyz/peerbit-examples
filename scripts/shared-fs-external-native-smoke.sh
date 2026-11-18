@@ -11,8 +11,18 @@ log="${RUNNER_TEMP:-/tmp}/pbfs-mount.log"
 
 is_mountpoint() {
   local target="$1"
-  if [ "$(uname -s)" != "Darwin" ] && command -v mountpoint >/dev/null 2>&1; then
-    mountpoint -q -- "$target"
+  if [ -r /proc/self/mountinfo ]; then
+    # The mount table, not stat: a disconnected FUSE mount (its adapter was
+    # killed) fails stat but is still mounted. Field 5 is the mount point,
+    # resolved and with space, tab, newline and backslash escaped.
+    local parent
+    parent="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+    target="$parent/$(basename "$target")"
+    target="${target//\\/\\134}"
+    target="${target// /\\040}"
+    target="${target//$'\t'/\\011}"
+    target="${target//$'\n'/\\012}"
+    MOUNT_TARGET="$target" awk '$5 == ENVIRON["MOUNT_TARGET"] { found = 1 } END { exit found ? 0 : 1 }' /proc/self/mountinfo
   else
     mount | awk -v target="$target" '
       index($0, " on " target " (") { found = 1 }
@@ -183,17 +193,20 @@ finish() {
 }
 trap finish EXIT
 
-for _ in {1..90}; do
-  if grep -q "Mounted " "$log"; then
-    break
-  fi
-  if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
-    cat "$log"
-    exit 1
-  fi
-  sleep 1
-done
-grep -q "Mounted " "$log" || { cat "$log"; exit 1; }
+wait_for_mounted() {
+  for _ in {1..90}; do
+    if grep -q "Mounted " "$log"; then
+      break
+    fi
+    if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
+      cat "$log"
+      exit 1
+    fi
+    sleep 1
+  done
+  grep -q "Mounted " "$log" || { cat "$log"; exit 1; }
+}
+wait_for_mounted
 
 assert_mount_ready() {
   if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
@@ -447,4 +460,92 @@ if [ -n "$getattr_guard_window" ]; then
     }
     console.log("Linux kernel cache check: the second stat cost exactly 1 getattr.");
   ' "$PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR/native-adapter.ndjson" $getattr_guard_window
+fi
+
+# Supervision, on Linux runs without benchmarks or profiling. kill -9 stands
+# in for a crash or an out-of-memory kill. An adapter killed after readiness
+# ends its mount process through the stop a shutdown request takes, with
+# exit status 70, within 2 s; a new mount clears the disconnected mount it
+# left; and when a mount process is killed, its adapter unmounts and exits
+# within 5 s. These are generous upper bounds: about 1.05 s (most of it the
+# same exit tail as after Ctrl-C) and 15 ms were measured. The wait for the
+# killed mount process's adapter, which is not this shell's child, checks
+# every 50 ms and ends as soon as it is gone.
+if [ "$(uname -s)" = "Linux" ] &&
+  [ -z "${PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-}" ] &&
+  [ -z "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ] &&
+  [ -z "${PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT:-}" ]; then
+  now_ms() {
+    date +%s%3N
+  }
+  # A zombie (exited, not yet reaped by its new parent) counts as gone.
+  process_alive() {
+    [ -e "/proc/$1" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status" 2>/dev/null
+  }
+  adapter_of() {
+    local pid
+    pid="$(pgrep -P "$1" -f -- "$adapter" | head -n 1 || true)"
+    if [ -z "$pid" ]; then
+      echo "No adapter process under mount process $1" >&2
+      return 1
+    fi
+    printf '%s' "$pid"
+  }
+
+  adapter_pid="$(adapter_of "$mount_pid")"
+  # Gives up after 30 s on a mount process that outlives its adapter: the
+  # kill makes its status 137, which fails below. Quiet, so that its sleep
+  # ended below is not reported as terminated.
+  (sleep 30 && kill -KILL "$mount_pid") >/dev/null 2>&1 &
+  give_up_pid="$!"
+  killed_at="$(now_ms)"
+  kill -KILL "$adapter_pid"
+  if wait "$mount_pid"; then mount_status=0; else mount_status="$?"; fi
+  exited_ms="$(($(now_ms) - killed_at))"
+  # Ending its sleep ends the give-up subshell before its kill.
+  pkill -P "$give_up_pid" sleep >/dev/null 2>&1 || true
+  wait "$give_up_pid" >/dev/null 2>&1 || true
+  echo "adapter killed: the mount process exited with status $mount_status after $exited_ms ms"
+  if [ "$mount_status" -ne 70 ]; then
+    echo "Expected exit status 70 after the adapter was killed, got $mount_status" >&2
+    exit 1
+  fi
+  if [ "$exited_ms" -gt 2000 ]; then
+    echo "The mount process took $exited_ms ms to exit after its adapter was killed (bound: 2000 ms)" >&2
+    exit 1
+  fi
+  grep -qF "Native adapter exited after mount readiness: code=null signal=SIGKILL; stopping the mount (exit status 70)." "$log"
+  grep -qF "native adapter stderr: " "$log"
+  # The stop ran persist-on-exit, which found no other replica here.
+  grep -qF "persist-on-exit: no other replica seen" "$log"
+  # The adapter's kernel connection died with it: the mount is disconnected.
+  if stat_output="$(stat -- "$mountpoint" 2>&1)" ||
+    [[ "$stat_output" != *"Transport endpoint is not connected"* ]]; then
+    echo "Expected a disconnected mount at $mountpoint, stat said: $stat_output" >&2
+    exit 1
+  fi
+
+  log="${log%.log}-remount.log"
+  node "${mount_args[@]}" >"$log" 2>&1 &
+  mount_pid="$!"
+  wait_for_mounted
+  assert_mount_ready
+  grep -qF "unmounted the disconnected mount that an earlier adapter left at $mountpoint" "$log"
+  printf "after remount" >"$mountpoint/remount.txt"
+  test "$(cat "$mountpoint/remount.txt")" = "after remount"
+  rm "$mountpoint/remount.txt"
+  echo "remounted over the disconnected mount"
+
+  adapter_pid="$(adapter_of "$mount_pid")"
+  killed_at="$(now_ms)"
+  kill -KILL "$mount_pid"
+  wait "$mount_pid" >/dev/null 2>&1 || true
+  while is_mountpoint "$mountpoint" || process_alive "$adapter_pid"; do
+    if [ "$(($(now_ms) - killed_at))" -gt 5000 ]; then
+      echo "5 s after its mount process was killed, the adapter is still running or $mountpoint still mounted" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  echo "mount process killed: the adapter unmounted and exited after $(($(now_ms) - killed_at)) ms"
 fi

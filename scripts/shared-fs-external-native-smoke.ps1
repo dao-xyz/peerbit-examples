@@ -137,14 +137,11 @@ function Assert-MountReady {
   }
 }
 
-$PrimaryFailure = $null
-$CleanupFailure = $null
-try {
-  $Mounted = $false
+function Wait-Mounted {
   for ($i = 0; $i -lt 90; $i++) {
     if ((Test-Path $Stdout) -and (Select-String -Path $Stdout -Pattern "Mounted " -Quiet)) {
-      $Mounted = $true
-      break
+      Assert-MountReady
+      return
     }
     if ($Process.HasExited) {
       Write-MountLogs
@@ -152,11 +149,32 @@ try {
     }
     Start-Sleep -Seconds 1
   }
-  if (-not $Mounted) {
-    Write-MountLogs
-    throw "mount did not become ready"
+  Write-MountLogs
+  throw "mount did not become ready"
+}
+
+function Get-AdapterProcess {
+  $AdapterName = [System.IO.Path]::GetFileName($Adapter)
+  $Adapters = @(Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId = $($Process.Id)" | Where-Object { $_.Name -eq $AdapterName })
+  if ($Adapters.Count -ne 1) {
+    throw "expected one adapter process under mount process $($Process.Id), found $($Adapters.Count)"
   }
-  Assert-MountReady
+  return Get-Process -Id $Adapters[0].ProcessId
+}
+
+function Wait-DriveRemoved([System.Diagnostics.Stopwatch]$Clock, [int]$TimeoutMs) {
+  while (Test-Path -LiteralPath $MountRoot) {
+    if ($Clock.ElapsedMilliseconds -gt $TimeoutMs) {
+      throw "WinFsp drive $MountRoot was still there $TimeoutMs ms after its adapter was stopped"
+    }
+    Start-Sleep -Milliseconds 50
+  }
+}
+
+$PrimaryFailure = $null
+$CleanupFailure = $null
+try {
+  Wait-Mounted
 
   New-Item -ItemType Directory -Force -Path (Join-Path $MountRoot "docs") | Out-Null
   $MetadataPath = Join-Path $MountRoot "docs\hello.txt"
@@ -462,6 +480,68 @@ try {
       throw "local filesystem control benchmark failed with exit code $LASTEXITCODE"
     }
     Assert-MountReady
+  }
+
+  # Supervision, on runs without benchmarks or profiling; taskkill /F stands
+  # in for a crash. An adapter killed after readiness ends its mount process
+  # through the stop a shutdown request takes, with exit code 70. WinFsp
+  # removes the drive of an adapter that died, so no disconnected mount is
+  # left and the same drive mounts again. A killed mount process takes its
+  # adapter with it: Node starts the adapter in a job object that kills it
+  # when the mount process's handle to the job closes. Times are reported;
+  # the waits here only give up (30 s, 5 s, 10 s), the Linux smoke checks the
+  # tight bounds.
+  if (-not ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR -or $env:PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT -or $env:PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT)) {
+    $AdapterProcess = Get-AdapterProcess
+    $Clock = [System.Diagnostics.Stopwatch]::StartNew()
+    & taskkill.exe /PID $($AdapterProcess.Id) /F | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "taskkill of adapter process $($AdapterProcess.Id) failed with exit code $LASTEXITCODE"
+    }
+    if (-not $Process.WaitForExit(30000)) {
+      throw "the mount process was still running 30 s after its adapter was killed"
+    }
+    Write-Host "adapter killed: the mount process exited with code $($Process.ExitCode) after $($Clock.ElapsedMilliseconds) ms"
+    if ($Process.ExitCode -ne 70) {
+      throw "expected exit code 70 after the adapter was killed, got $($Process.ExitCode)"
+    }
+    if (-not (Select-String -Path $Stderr -Pattern "Native adapter exited after mount readiness: code=\d+ signal=null; stopping the mount \(exit status 70\)\." -Quiet)) {
+      throw "the mount process did not report that its adapter exited"
+    }
+    # The stop ran persist-on-exit, which found no other replica here.
+    if (-not (Select-String -Path $Stderr -SimpleMatch "persist-on-exit: no other replica seen" -Quiet)) {
+      throw "the stop after the adapter exited did not run persist-on-exit"
+    }
+    Wait-DriveRemoved $Clock 10000
+
+    $Stdout = Join-Path $TempRoot "pbfs-remount.out.log"
+    $Stderr = Join-Path $TempRoot "pbfs-remount.err.log"
+    Remove-Item -Force -ErrorAction SilentlyContinue $Stdout, $Stderr
+    $Process = Start-Process -FilePath "node" -ArgumentList $MountArgs -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
+    $null = $Process.Handle
+    Wait-Mounted
+    $RemountPath = Join-Path $MountRoot "remount.txt"
+    Set-Content -NoNewline -Path $RemountPath -Value "after remount"
+    $Remounted = Get-Content -Raw -LiteralPath $RemountPath
+    if ($Remounted -ne "after remount") {
+      throw "unexpected file contents after remount: $Remounted"
+    }
+    [System.IO.File]::Delete($RemountPath)
+    Write-Host "remounted $MountRoot after the adapter was killed"
+
+    $AdapterProcess = Get-AdapterProcess
+    $Clock = [System.Diagnostics.Stopwatch]::StartNew()
+    # The mount process alone, not its tree.
+    & taskkill.exe /PID $($Process.Id) /F | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "taskkill of mount process $($Process.Id) failed with exit code $LASTEXITCODE"
+    }
+    if (-not $AdapterProcess.WaitForExit(5000)) {
+      throw "adapter process $($AdapterProcess.Id) was still running 5 s after its mount process was killed"
+    }
+    Wait-DriveRemoved $Clock 10000
+    Write-Host "mount process killed: its adapter exited and $MountRoot was removed after $($Clock.ElapsedMilliseconds) ms"
+    $null = $Process.WaitForExit(10000)
   }
 } catch {
   $PrimaryFailure = $_
