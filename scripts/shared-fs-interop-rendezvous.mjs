@@ -38,6 +38,14 @@
 // - after a grace period, when an expected peer has no job in this run, or
 //   this job's own presence step never shows up (a renamed job or step).
 //
+// With --seed-address <dir>, a joiner instead waits for the address that the
+// seed publishes once every peer is ready: it downloads this run attempt's
+// shared-fs-address-<attempt> artifact into <dir>, every
+// --address-poll-seconds. Every --seed-check-seconds it also lists the jobs,
+// and it fails at once when the seed's job (--seed <machine>) has finished
+// without publishing the address, naming the job's conclusion and the step
+// that ended it. Otherwise it gives up after --address-timeout-minutes.
+//
 // Each poll is one REST request on the job's GITHUB_TOKEN, and every job in
 // the repository shares that token's 1,000 requests an hour. So a peer polls
 // every --poll-seconds while its wait is short, and every
@@ -50,10 +58,16 @@
 //     [--settle-seconds 60] [--poll-seconds 10] [--slow-poll-seconds 30]
 //     [--slow-after-seconds 180] [--report-seconds 60] [--grace-seconds 120]
 //     [--presence-step "Report interop presence"]
+//   node scripts/shared-fs-interop-rendezvous.mjs --machine <machine>
+//     --seed <machine> --seed-address <dir> [--address-timeout-minutes 13]
+//     [--address-poll-seconds 5] [--seed-check-seconds 15]
+//     [--report-seconds 60]
 // Reads GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT; gh reads
 // GH_TOKEN.
 
 import { execFile } from "node:child_process";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import path from "node:path";
 
 const PRESENCE_STEP = "Report interop presence";
 
@@ -78,6 +92,29 @@ const parseArgs = (args) => {
     const machine = value("--machine");
     if (!machine) {
         throw new Error("--machine is required");
+    }
+    if (args.includes("--seed-address")) {
+        const seedAddress = value("--seed-address");
+        const seed = value("--seed");
+        if (!seedAddress || seedAddress.startsWith("--")) {
+            throw new Error(
+                "--seed-address needs the directory to download the address into"
+            );
+        }
+        if (!seed || seed.startsWith("--")) {
+            throw new Error(
+                "--seed-address needs --seed <machine>: the peer whose job publishes the address"
+            );
+        }
+        return {
+            machine,
+            seed,
+            seedAddress,
+            addressMs: seconds("--address-timeout-minutes", 13, 60),
+            pollMs: seconds("--address-poll-seconds", 5),
+            seedCheckMs: seconds("--seed-check-seconds", 15),
+            reportMs: seconds("--report-seconds", 60),
+        };
     }
     const expected = (value("--expected") ?? "")
         .split(",")
@@ -274,26 +311,13 @@ const escapeData = (text) =>
         .replace(/\r/g, "%0D")
         .replace(/\n/g, "%0A");
 
-const main = async () => {
-    const options = parseArgs(process.argv.slice(2));
-    const repository = process.env.GITHUB_REPOSITORY;
-    const runId = process.env.GITHUB_RUN_ID;
-    if (!repository || !runId) {
-        throw new Error("GITHUB_REPOSITORY and GITHUB_RUN_ID are required");
-    }
-    const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT) || 1;
+const sleep = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 
-    const say = (message) =>
-        console.log(
-            `${new Date().toISOString()} [rendezvous ${options.machine}] ${message}`
-        );
-    const fail = (message) => {
-        console.log(
-            `::error title=Interop rendezvous (${options.machine})::${escapeData(message)}`
-        );
-        process.exitCode = 1;
-    };
-
+const rendezvous = async (
+    options,
+    { repository, runId, runAttempt, say, fail }
+) => {
     const startedAt = Date.now();
     // The arrival budget counts from when the peer jobs were created: the
     // earliest created_at among them (an attempt creates them together), so
@@ -489,16 +513,163 @@ const main = async () => {
                 `still waiting after ${duration(now - startedAt)}; polling every ${options.slowPollMs / 1000}s from now on`
             );
         }
-        await new Promise((resolve) =>
-            setTimeout(
-                resolve,
-                Math.min(
-                    slowed ? options.slowPollMs : options.pollMs,
-                    giveUpAt - now
-                )
+        await sleep(
+            Math.min(
+                slowed ? options.slowPollMs : options.pollMs,
+                giveUpAt - now
             )
         );
     }
+};
+
+// What `gh run download` prints while the run has no artifact of the name:
+// none at all, or none that matches (an earlier attempt's).
+const NOT_PUBLISHED =
+    /no valid artifacts found to download|no artifact matches any of the names or patterns provided/;
+
+// The first step of `job` that ended other than in success or a skip.
+const failedStep = (job) =>
+    (job.steps ?? []).find(
+        (step) =>
+            step?.status === "completed" &&
+            step.conclusion !== "success" &&
+            step.conclusion !== "skipped"
+    );
+
+const awaitSeedAddress = async (
+    options,
+    { repository, runId, runAttempt, say, fail }
+) => {
+    const artifact = `shared-fs-address-${runAttempt}`;
+    const file = path.join(options.seedAddress, "address.txt");
+    const startedAt = Date.now();
+    let lastCheck = -Infinity;
+    let lastErrorReport = -Infinity;
+    let lastSeed;
+
+    // Fails for good, returning false, or reports the error at most once
+    // per report interval and returns true, to retry.
+    const retry = (action, error) => {
+        const permanent = permanentFailure(error, action, {
+            repository,
+            runId,
+        });
+        if (permanent) {
+            fail(permanent);
+            return false;
+        }
+        if (Date.now() - lastErrorReport >= options.reportMs) {
+            say(`${action} failed (${error.message}); retrying`);
+            lastErrorReport = Date.now();
+        }
+        return true;
+    };
+    // { address }, empty while this attempt's artifact is not published, or
+    // { error }.
+    const download = async () => {
+        // gh does not overwrite a file, so each try starts without one.
+        await rm(file, { force: true });
+        try {
+            await gh([
+                "run",
+                "download",
+                runId,
+                "--repo",
+                repository,
+                "--name",
+                artifact,
+                "--dir",
+                options.seedAddress,
+            ]);
+        } catch (error) {
+            return NOT_PUBLISHED.test(error.output)
+                ? { address: "" }
+                : { error };
+        }
+        return {
+            address: (await readFile(file, "utf8").catch(() => "")).trim(),
+        };
+    };
+
+    await mkdir(options.seedAddress, { recursive: true });
+    say(
+        `waiting for ${artifact}, the address that the job of ${options.seed} publishes, for at most ${duration(options.addressMs)}`
+    );
+    for (;;) {
+        let result = await download();
+        if (result.error && !retry(`downloading ${artifact}`, result.error)) {
+            return;
+        }
+        if (!result.address && Date.now() - lastCheck >= options.seedCheckMs) {
+            lastCheck = Date.now();
+            let jobs;
+            try {
+                jobs = await listJobs(repository, runId);
+            } catch (error) {
+                if (!retry("listing this run's jobs", error)) {
+                    return;
+                }
+            }
+            const seed = jobs && jobOf(jobs, options.seed).job;
+            lastSeed = seed ?? lastSeed;
+            if (seed?.status === "completed") {
+                // It may have published the address just before it finished.
+                result = await download();
+                if (
+                    result.error &&
+                    !retry(`downloading ${artifact}`, result.error)
+                ) {
+                    return;
+                }
+                if (!result.address && !result.error) {
+                    const step = failedStep(seed);
+                    fail(
+                        `${seed.name} finished (${seed.conclusion ?? "no conclusion"}) without publishing ${artifact}${step ? `: its step "${step.name}" ended in ${step.conclusion}` : ""}, so there is no seed to join`
+                    );
+                    return;
+                }
+            }
+        }
+        if (result.address) {
+            say(`${artifact}: ${result.address}`);
+            return;
+        }
+        const now = Date.now();
+        if (now - startedAt >= options.addressMs) {
+            fail(
+                `Timed out waiting for seed address artifact ${artifact}, ${duration(now - startedAt)} after this step started${lastSeed ? `; ${lastSeed.name} was ${lastSeed.status}` : ""}`
+            );
+            return;
+        }
+        await sleep(
+            Math.min(options.pollMs, startedAt + options.addressMs - now)
+        );
+    }
+};
+
+const main = async () => {
+    const options = parseArgs(process.argv.slice(2));
+    const repository = process.env.GITHUB_REPOSITORY;
+    const runId = process.env.GITHUB_RUN_ID;
+    if (!repository || !runId) {
+        throw new Error("GITHUB_REPOSITORY and GITHUB_RUN_ID are required");
+    }
+    const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT) || 1;
+    const label = options.seedAddress ? "seed address" : "rendezvous";
+    const say = (message) =>
+        console.log(
+            `${new Date().toISOString()} [${label} ${options.machine}] ${message}`
+        );
+    const fail = (message) => {
+        console.log(
+            `::error title=Interop ${label} (${options.machine})::${escapeData(message)}`
+        );
+        process.exitCode = 1;
+    };
+    const run = { repository, runId, runAttempt, say, fail };
+    await (options.seedAddress
+        ? awaitSeedAddress(options, run)
+        : rendezvous(options, run));
 };
 
 main().catch((error) => {

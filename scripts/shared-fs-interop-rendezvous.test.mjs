@@ -1,6 +1,7 @@
 // Runs scripts/shared-fs-interop-rendezvous.mjs against a fake gh: a PATH
 // shim that answers each `gh api` call with the next canned listing of this
-// run's jobs (the last one repeats), and records its arguments.
+// run's jobs, and each `gh run download` with the next canned download of
+// the seed's address (the last of each repeats), and records its arguments.
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -14,20 +15,40 @@ const script = fileURLToPath(
     new URL("./shared-fs-interop-rendezvous.mjs", import.meta.url)
 );
 
-// Call n gets response n (the last one repeats): response-<n>.json on
-// stdout, or error-<n>.txt on stderr with exit status 1 (or exit-<n>.txt).
+// Call n of a kind (api, download) gets that kind's response n (the last one
+// repeats): <kind>-error-<n>.txt on stderr with exit status 1 (or
+// <kind>-exit-<n>.txt), else api-<n>.json on stdout, or download-<n>.txt
+// extracted as address.txt into --dir, which, like gh, it never overwrites.
 const FAKE_GH = `#!/bin/sh
 dir="$FAKE_GH_DIR"
-n=$(cat "$dir/count" 2>/dev/null || echo 0)
-echo $((n + 1)) > "$dir/count"
 printf '%s\\n' "$*" >> "$dir/calls.log"
-last=$(cat "$dir/last")
-if [ "$n" -gt "$last" ]; then n=$last; fi
-if [ -f "$dir/error-$n.txt" ]; then
-    cat "$dir/error-$n.txt" >&2
-    exit "$(cat "$dir/exit-$n.txt" 2>/dev/null || echo 1)"
+if [ "$1 $2" = "run download" ]; then kind=download; else kind=api; fi
+n=$(cat "$dir/$kind-count" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$dir/$kind-count"
+last=$(cat "$dir/$kind-last" 2>/dev/null || echo -1)
+if [ "$last" -lt 0 ]; then
+    echo "fake gh: no $kind responses" >&2
+    exit 1
 fi
-cat "$dir/response-$n.json"
+if [ "$n" -gt "$last" ]; then n=$last; fi
+if [ -f "$dir/$kind-error-$n.txt" ]; then
+    cat "$dir/$kind-error-$n.txt" >&2
+    exit "$(cat "$dir/$kind-exit-$n.txt" 2>/dev/null || echo 1)"
+fi
+if [ "$kind" = api ]; then
+    cat "$dir/api-$n.json"
+    exit 0
+fi
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--dir" ]; then dest="$2"; fi
+    shift
+done
+if [ -e "$dest/address.txt" ]; then
+    echo "error extracting \\"address.txt\\": open $dest/address.txt: file exists" >&2
+    exit 1
+fi
+mkdir -p "$dest"
+cp "$dir/download-$n.txt" "$dest/address.txt"
 `;
 
 // The peer jobs of an attempt are created together, when the plan job
@@ -140,32 +161,33 @@ const seed = (options) => job("Seed peer (linux)", options);
 const joiner = (machine, options) => job(`Join peer (${machine})`, options);
 
 /**
- * Runs the rendezvous as `machine` (linux unless --machine is passed) with
- * short intervals; `responses` are the fake gh's answers, in call order.
+ * Writes the fake gh's answers to one kind of call, in call order: a jobs
+ * listing (an array of jobs), a download ({ address }), or { error,
+ * exitCode } for either.
  */
-const rendezvous = async (t, responses, args = [], env = {}) => {
-    const dir = await mkdtemp(path.join(tmpdir(), "interop-rendezvous-"));
-    t.after(() => rm(dir, { recursive: true, force: true }));
-    await writeFile(path.join(dir, "gh"), FAKE_GH);
-    await chmod(path.join(dir, "gh"), 0o755);
-    // The default listing numbers every job with the latest attempt, a job
-    // that a re-run of only some jobs carried over included.
-    const attempt = Number(env.GITHUB_RUN_ATTEMPT ?? "1");
+const writeResponses = async (dir, kind, responses, attempt) => {
     for (const [index, response] of responses.entries()) {
         if (response.error) {
             await writeFile(
-                path.join(dir, `error-${index}.txt`),
+                path.join(dir, `${kind}-error-${index}.txt`),
                 `${response.error}\n`
             );
             if (response.exitCode !== undefined) {
                 await writeFile(
-                    path.join(dir, `exit-${index}.txt`),
+                    path.join(dir, `${kind}-exit-${index}.txt`),
                     String(response.exitCode)
                 );
             }
-        } else {
+        } else if (kind === "download") {
             await writeFile(
-                path.join(dir, `response-${index}.json`),
+                path.join(dir, `download-${index}.txt`),
+                `${response.address}\n`
+            );
+        } else {
+            // The default listing numbers every job with the latest attempt,
+            // a job that a re-run of only some jobs carried over included.
+            await writeFile(
+                path.join(dir, `api-${index}.json`),
                 JSON.stringify({
                     total_count: response.length,
                     jobs: response.map((entry) => ({
@@ -176,19 +198,29 @@ const rendezvous = async (t, responses, args = [], env = {}) => {
             );
         }
     }
-    await writeFile(path.join(dir, "last"), String(responses.length - 1));
+    await writeFile(
+        path.join(dir, `${kind}-last`),
+        String(responses.length - 1)
+    );
+};
 
-    const options = new Map([
-        ["--machine", "linux"],
-        ["--expected", "linux,macos,windows"],
-        ["--poll-seconds", "0.05"],
-        ["--slow-poll-seconds", "0.05"],
-        ["--slow-after-seconds", "600"],
-        ["--report-seconds", "0.25"],
-        ["--grace-seconds", "0.6"],
-        ["--arrival-timeout-minutes", "0.1"],
-        ["--settle-seconds", "0.2"],
-    ]);
+/**
+ * Runs the script in a fresh directory, with `defaults` and then `args` as
+ * its options, against the fake gh's `listings` and `downloads`.
+ */
+const runScript = async (
+    t,
+    { listings = [], downloads = [], defaults, args = [], env = {} }
+) => {
+    const dir = await mkdtemp(path.join(tmpdir(), "interop-rendezvous-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    await writeFile(path.join(dir, "gh"), FAKE_GH);
+    await chmod(path.join(dir, "gh"), 0o755);
+    const attempt = Number(env.GITHUB_RUN_ATTEMPT ?? "1");
+    await writeResponses(dir, "api", listings, attempt);
+    await writeResponses(dir, "download", downloads, attempt);
+
+    const options = new Map(defaults);
     for (let index = 0; index < args.length; index += 2) {
         options.set(args[index], args[index + 1]);
     }
@@ -198,6 +230,7 @@ const rendezvous = async (t, responses, args = [], env = {}) => {
             process.execPath,
             [script, ...[...options].flat()],
             {
+                cwd: dir,
                 env: {
                     ...process.env,
                     PATH: `${dir}${path.delimiter}${process.env.PATH}`,
@@ -228,8 +261,51 @@ const rendezvous = async (t, responses, args = [], env = {}) => {
     t.diagnostic(
         `exit ${result.code} after ${elapsedMs} ms and ${calls.length} gh call(s)`
     );
-    return { ...result, lines, calls, elapsedMs };
+    return { ...result, lines, calls, elapsedMs, dir };
 };
+
+/**
+ * Runs the rendezvous as `machine` (linux unless --machine is passed) with
+ * short intervals; `responses` are the fake gh's listings, in call order.
+ */
+const rendezvous = (t, responses, args = [], env = {}) =>
+    runScript(t, {
+        listings: responses,
+        defaults: [
+            ["--machine", "linux"],
+            ["--expected", "linux,macos,windows"],
+            ["--poll-seconds", "0.05"],
+            ["--slow-poll-seconds", "0.05"],
+            ["--slow-after-seconds", "600"],
+            ["--report-seconds", "0.25"],
+            ["--grace-seconds", "0.6"],
+            ["--arrival-timeout-minutes", "0.1"],
+            ["--settle-seconds", "0.2"],
+        ],
+        args,
+        env,
+    });
+
+/**
+ * Runs the macOS joiner's wait for the seed's address, into
+ * shared-fs-address, with short intervals.
+ */
+const seedAddress = (t, { listings, downloads, args = [], env = {} }) =>
+    runScript(t, {
+        listings,
+        downloads,
+        defaults: [
+            ["--machine", "macos"],
+            ["--seed", "linux"],
+            ["--seed-address", "shared-fs-address"],
+            ["--address-poll-seconds", "0.05"],
+            ["--seed-check-seconds", "0.05"],
+            ["--report-seconds", "0.25"],
+            ["--address-timeout-minutes", "0.05"],
+        ],
+        args,
+        env,
+    });
 
 const errors = (lines) => lines.filter((line) => line.startsWith("::error"));
 
@@ -1059,3 +1135,296 @@ test("rejects an expected list without its own machine", async (t) => {
         /--expected \(macos,windows\) must include --machine \(linux\)/
     );
 });
+
+// The joiners' wait for the seed's address (--seed-address).
+
+const ADDRESS = "/ip4/10.1.0.4/tcp/4002/ws/p2p/12D3KooWSeedPeerAddress";
+// What gh run download prints while this attempt has no address yet: the
+// run has no artifact at all, or only an earlier attempt's.
+const NONE_YET = { error: "no valid artifacts found to download" };
+const NOT_THIS_ATTEMPT = {
+    error: "no artifact matches any of the names or patterns provided",
+};
+
+/**
+ * The seed's job, finished with `conclusion`, its steps having ended as
+ * `steps` ([name, conclusion] in order).
+ */
+const finishedSeed = (conclusion, steps) => ({
+    ...seed({ status: "completed", conclusion, ready: true }),
+    steps: steps.map(([name, stepConclusion], index) => ({
+        name,
+        status: "completed",
+        conclusion: stepConclusion,
+        number: index + 1,
+        completed_at: new Date().toISOString(),
+    })),
+});
+
+const SEED_STEPS = [
+    "Set up job",
+    "Build shared-fs packages",
+    PRESENCE,
+    "Wait until every peer is ready",
+    "Start seed peer",
+    "Upload shared filesystem address",
+    "Wait for all OS peers",
+    "Complete job",
+];
+
+const kind = (call) =>
+    call.startsWith("run download ") ? "download" : call.split(" ")[0];
+
+test("downloads this attempt's seed address once the seed publishes it", async (t) => {
+    const { code, lines, calls, dir } = await seedAddress(t, {
+        listings: [
+            [plan(), seed({ ready: true }), joiner("macos", { ready: true })],
+        ],
+        downloads: [NONE_YET, NOT_THIS_ATTEMPT, { address: ADDRESS }],
+        env: { GITHUB_RUN_ID: "44300000001", GITHUB_RUN_ATTEMPT: "2" },
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(errors(lines), []);
+    const download =
+        "run download 44300000001 --repo dao-xyz/peerbit-examples --name shared-fs-address-2 --dir shared-fs-address";
+    const listing =
+        "api repos/dao-xyz/peerbit-examples/actions/runs/44300000001/jobs?per_page=100";
+    assert.deepEqual(
+        calls.filter((call) => kind(call) === "download"),
+        [download, download, download]
+    );
+    assert.ok(
+        calls.every((call) => call === download || call === listing),
+        calls.join("\n")
+    );
+    assert.match(
+        lines[0],
+        /\[seed address macos\] waiting for shared-fs-address-2, the address that the job of linux publishes, for at most 0m03s$/
+    );
+    assert.ok(
+        lines
+            .at(-1)
+            .endsWith(`[seed address macos] shared-fs-address-2: ${ADDRESS}`),
+        lines.at(-1)
+    );
+    assert.equal(
+        await readFile(path.join(dir, "shared-fs-address/address.txt"), "utf8"),
+        `${ADDRESS}\n`
+    );
+});
+
+test("fails at once when the seed's job finished without publishing the address", async (t) => {
+    // Its seed never started, so the upload was skipped.
+    const steps = SEED_STEPS.map((name) => [
+        name,
+        name === "Start seed peer"
+            ? "failure"
+            : SEED_STEPS.indexOf(name) >
+                    SEED_STEPS.indexOf("Start seed peer") &&
+                name !== "Complete job"
+              ? "skipped"
+              : "success",
+    ]);
+    const { code, lines, calls, elapsedMs } = await seedAddress(t, {
+        listings: [
+            [
+                plan(),
+                finishedSeed("failure", steps),
+                joiner("macos", { ready: true }),
+            ],
+        ],
+        downloads: [NONE_YET],
+        args: ["--address-timeout-minutes", "1"],
+    });
+    assert.equal(code, 1);
+    // It downloads, lists the jobs, and downloads once more in case the
+    // seed published the address just before its job finished.
+    assert.deepEqual(calls.map(kind), ["download", "api", "download"]);
+    assert.ok(elapsedMs < 10_000, `failed after ${elapsedMs} ms`);
+    assert.deepEqual(errors(lines), [
+        '::error title=Interop seed address (macos)::Seed peer (linux) finished (failure) without publishing shared-fs-address-1: its step "Start seed peer" ended in failure, so there is no seed to join',
+    ]);
+});
+
+test("names the seed's step that was cancelled", async (t) => {
+    const steps = SEED_STEPS.map((name) => [
+        name,
+        name === "Wait until every peer is ready"
+            ? "cancelled"
+            : SEED_STEPS.indexOf(name) >
+                    SEED_STEPS.indexOf("Wait until every peer is ready") &&
+                name !== "Complete job"
+              ? "skipped"
+              : "success",
+    ]);
+    const { code, lines } = await seedAddress(t, {
+        listings: [[plan(), finishedSeed("cancelled", steps)]],
+        downloads: [NOT_THIS_ATTEMPT],
+    });
+    assert.equal(code, 1);
+    assert.match(
+        errors(lines)[0],
+        /::Seed peer \(linux\) finished \(cancelled\) without publishing shared-fs-address-1: its step "Wait until every peer is ready" ended in cancelled, so there is no seed to join$/
+    );
+});
+
+test("takes an address that the seed published just before its job finished", async (t) => {
+    const { code, lines, calls } = await seedAddress(t, {
+        listings: [
+            [
+                plan(),
+                finishedSeed(
+                    "success",
+                    SEED_STEPS.map((name) => [name, "success"])
+                ),
+                joiner("macos", { ready: true }),
+            ],
+        ],
+        downloads: [NONE_YET, { address: ADDRESS }],
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(errors(lines), []);
+    assert.deepEqual(calls.map(kind), ["download", "api", "download"]);
+    assert.ok(lines.at(-1).endsWith(`shared-fs-address-1: ${ADDRESS}`));
+});
+
+test("gives up after the address timeout, naming the artifact and the seed's job", async (t) => {
+    const { code, lines, elapsedMs } = await seedAddress(t, {
+        listings: [
+            [plan(), seed({ ready: true }), joiner("macos", { ready: true })],
+        ],
+        downloads: [NOT_THIS_ATTEMPT],
+        args: ["--address-timeout-minutes", "0.01"],
+    });
+    assert.equal(code, 1);
+    assert.ok(elapsedMs >= 600, `gave up after ${elapsedMs} ms`);
+    assert.match(
+        errors(lines)[0],
+        /::Timed out waiting for seed address artifact shared-fs-address-1, 0m0\ds after this step started; Seed peer \(linux\) was in_progress$/
+    );
+});
+
+test("checks the seed's job at most every --seed-check-seconds", async (t) => {
+    const { code, calls, elapsedMs } = await seedAddress(t, {
+        listings: [
+            [plan(), seed({ ready: true }), joiner("macos", { ready: true })],
+        ],
+        downloads: [NOT_THIS_ATTEMPT],
+        args: [
+            "--seed-check-seconds",
+            "0.5",
+            "--address-timeout-minutes",
+            "0.025",
+        ],
+    });
+    assert.equal(code, 1);
+    const listings = calls.filter((call) => kind(call) === "api").length;
+    const downloads = calls.filter((call) => kind(call) === "download").length;
+    // It lists the jobs at once, then at most every 0.5 s, and downloads
+    // every 50 ms in between: not a listing after every download.
+    assert.ok(
+        listings >= 1 && listings <= Math.floor(elapsedMs / 500) + 1,
+        `${listings} listings in ${elapsedMs} ms`
+    );
+    assert.ok(
+        listings < downloads,
+        `${listings} listings, ${downloads} downloads`
+    );
+});
+
+test("retries a download that failed for a transient reason, or held no address", async (t) => {
+    const { code, lines, calls } = await seedAddress(t, {
+        listings: [
+            [plan(), seed({ ready: true }), joiner("macos", { ready: true })],
+        ],
+        downloads: [
+            {
+                error: "error fetching artifacts: HTTP 502: Bad Gateway (https://api.github.com/repos/dao-xyz/peerbit-examples/actions/runs/123/artifacts?per_page=100)",
+            },
+            {
+                error: "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+            },
+            // An empty address.txt, which the next download must not trip
+            // over: gh never overwrites a file.
+            { address: "" },
+            { address: ADDRESS },
+        ],
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(errors(lines), []);
+    assert.equal(calls.filter((call) => kind(call) === "download").length, 4);
+    assert.ok(
+        lines.some((line) =>
+            line.endsWith(
+                "] downloading shared-fs-address-1 failed (error fetching artifacts: HTTP 502: Bad Gateway (https://api.github.com/repos/dao-xyz/peerbit-examples/actions/runs/123/artifacts?per_page=100)); retrying"
+            )
+        )
+    );
+    assert.ok(lines.at(-1).endsWith(`shared-fs-address-1: ${ADDRESS}`));
+});
+
+test("fails at once when the token may not download the address (HTTP 403)", async (t) => {
+    const { code, lines, calls } = await seedAddress(t, {
+        listings: [
+            [plan(), seed({ ready: true }), joiner("macos", { ready: true })],
+        ],
+        downloads: [
+            {
+                error: "error fetching artifacts: HTTP 403: Resource not accessible by integration (https://api.github.com/repos/dao-xyz/peerbit-examples/actions/runs/123/artifacts?per_page=100)",
+            },
+            { address: ADDRESS },
+        ],
+    });
+    assert.equal(code, 1);
+    assert.equal(calls.length, 1, "no retry");
+    assert.match(
+        errors(lines)[0],
+        /^::error title=Interop seed address \(macos\)::downloading shared-fs-address-1 was refused \(error fetching artifacts: HTTP 403: Resource not accessible by integration \(https:\/\/api\.github\.com\/repos\/dao-xyz\/peerbit-examples\/actions\/runs\/123\/artifacts\?per_page=100\)\): the workflow's token needs the "actions: read" permission$/
+    );
+});
+
+test("fails at once when the token may not list the seed's job (HTTP 403)", async (t) => {
+    const { code, lines, calls } = await seedAddress(t, {
+        listings: [
+            { error: "gh: Resource not accessible by integration (HTTP 403)" },
+        ],
+        downloads: [NONE_YET],
+    });
+    assert.equal(code, 1);
+    assert.deepEqual(calls.map(kind), ["download", "api"]);
+    assert.match(
+        errors(lines)[0],
+        /::listing this run's jobs was refused \(gh: Resource not accessible by integration \(HTTP 403\)\): the workflow's token needs the "actions: read" permission$/
+    );
+});
+
+for (const { title, defaults, message } of [
+    {
+        title: "--seed",
+        defaults: [
+            ["--machine", "macos"],
+            ["--seed-address", "shared-fs-address"],
+        ],
+        message:
+            "--seed-address needs --seed <machine>: the peer whose job publishes the address",
+    },
+    {
+        title: "a directory",
+        defaults: [
+            ["--machine", "macos"],
+            ["--seed", "linux"],
+            ["--seed-address", ""],
+        ],
+        message:
+            "--seed-address needs the directory to download the address into",
+    },
+]) {
+    test(`rejects --seed-address without ${title}`, async (t) => {
+        const { code, lines, calls } = await runScript(t, { defaults });
+        assert.equal(code, 1);
+        assert.equal(calls.length, 0);
+        assert.deepEqual(errors(lines), [
+            `::error title=Interop rendezvous::${message}`,
+        ]);
+    });
+}

@@ -18,7 +18,9 @@ name: Shared FS Cross-OS Interop
 # the same times, and waits up to a minute past that deadline for the listing
 # (a few seconds behind) to show them, so every peer reaches the same
 # decision unless the listing falls further behind. It finds a peer's job by
-# the "(<machine>)" that ends its name.
+# the "(<machine>)" that ends its name. A joiner then stops waiting for the
+# seed's address as soon as the seed's job has finished without publishing
+# it.
 # The plan job sizes the peer jobs' time limit to hold the arrival budget as
 # well as the interop, so a late peer never finds another's job at its limit.
 on:
@@ -349,24 +351,20 @@ jobs:
                     --expected "$INTEROP_EXPECTED_MACHINES" \
                     --arrival-timeout-minutes "$INTEROP_ARRIVAL_TIMEOUT_MINUTES"
 
+            # Waits for this attempt's shared-fs-address-<attempt> artifact,
+            # for at most 13 minutes, and fails at once when the seed's job
+            # has finished without publishing it.
             - name: Download seed address
               shell: bash
               timeout-minutes: 15
               env:
                   GH_TOKEN: ${{ github.token }}
+                  INTEROP_MACHINE: ${{ matrix.machine }}
               run: |
-                  set -euo pipefail
-                  mkdir -p shared-fs-address
-                  for _ in {1..120}; do
-                    rm -f shared-fs-address/address.txt
-                    if gh run download "$GITHUB_RUN_ID" -n "shared-fs-address-$GITHUB_RUN_ATTEMPT" -D shared-fs-address >/dev/null 2>&1 && test -s shared-fs-address/address.txt; then
-                      cat shared-fs-address/address.txt
-                      exit 0
-                    fi
-                    sleep 5
-                  done
-                  echo "Timed out waiting for seed address artifact"
-                  exit 1
+                  node scripts/shared-fs-interop-rendezvous.mjs \
+                    --machine "$INTEROP_MACHINE" \
+                    --seed linux \
+                    --seed-address shared-fs-address
 
             - name: Join shared filesystem
               shell: bash
