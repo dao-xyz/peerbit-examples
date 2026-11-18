@@ -1112,6 +1112,54 @@ describe("mount local overlay", () => {
         expect(target.stat).toHaveBeenCalledWith("/node_modules");
     });
 
+    it("refuses to save an open shared file whose path became local, without calling the target", async () => {
+        const ignoring = await openIgnoring({});
+        const mutators = {
+            writeFile: vi.fn(ignoring.writeFile.bind(ignoring)),
+            writeNodeForMount: vi.fn(ignoring.writeNodeForMount.bind(ignoring)),
+            setMetadata: vi.fn(ignoring.setMetadata.bind(ignoring)),
+            mkdir: vi.fn(ignoring.mkdir.bind(ignoring)),
+            mutateNamespaceForMount: vi.fn(
+                ignoring.mutateNamespaceForMount.bind(ignoring)
+            ),
+        };
+        const recording = new Proxy(ignoring, {
+            get: (original, property) => {
+                if (Object.hasOwn(mutators, property)) {
+                    return mutators[property as keyof typeof mutators];
+                }
+                const value = Reflect.get(original, property, original);
+                return typeof value === "function"
+                    ? value.bind(original)
+                    : value;
+            },
+        });
+        const { backend } = await mount(recording);
+        await backend.mkdir("/cache");
+        const handle = await backend.open("/cache/x", {
+            write: true,
+            create: true,
+        });
+        await backend.write(handle, encode("shared"), 0);
+        expect(mutators.mkdir).toHaveBeenCalledOnce();
+
+        await setIgnoreRules(
+            ignoring,
+            "cache/\n",
+            () => ignoring.ignoreCheck("/cache/x").ignored
+        );
+        for (const spy of Object.values(mutators)) spy.mockClear();
+        // The save goes by path, now a local one: the backend refuses it.
+        await expect(backend.release(handle)).rejects.toMatchObject({
+            code: "EACCES",
+            message: "kept local by this mount: /cache/x",
+        });
+        for (const spy of Object.values(mutators)) {
+            expect(spy).not.toHaveBeenCalled();
+        }
+        expect(await ignoring.stat("/cache/x")).toBeUndefined();
+    });
+
     it("makes only lookups on its target for a local workload", async () => {
         const mutators = {
             writeFile: vi.fn(fs.writeFile.bind(fs)),
