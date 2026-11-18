@@ -78,17 +78,27 @@ test("the step pins one release MSI", async () => {
 
 test("the step passes each pin to a parameter of the install script", async () => {
     const [{ step }] = await installSteps();
-    assert.match(step, /^ +scripts\/install-winfsp\.ps1 `$/mu);
+    // One command: every line but the last ends in a continuation backtick,
+    // so no pin can fall off the call.
+    const pins = Object.entries(PINS);
+    const call = [
+        "^ +scripts/install-winfsp\\.ps1 `",
+        ...pins.map(
+            ([parameter, name], index) =>
+                ` +-${parameter} \\$env:${name}${index < pins.length - 1 ? " `" : ""}`
+        ),
+    ].join("\\n");
+    assert.match(
+        step,
+        new RegExp(`${call}$`, "mu"),
+        "the step does not call install-winfsp.ps1 as one command with every pin"
+    );
     const script = (
         await readFile(new URL("install-winfsp.ps1", import.meta.url), "utf8")
     ).replace(/\r\n/gu, "\n");
     const params = script.match(/^param\(\n([\s\S]*?)^\)$/mu);
     assert.ok(params, "install-winfsp.ps1 has no param block");
-    for (const [parameter, name] of Object.entries(PINS)) {
-        assert.match(
-            step,
-            new RegExp(`^ +-${parameter} \\$env:${name}( \`)?$`, "mu")
-        );
+    for (const [parameter] of pins) {
         assert.match(
             params[1],
             new RegExp(`\\]\\$${parameter}\\b`, "u"),
