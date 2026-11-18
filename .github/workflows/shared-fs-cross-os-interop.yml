@@ -1,5 +1,22 @@
 name: Shared FS Cross-OS Interop
 
+# A Linux seed and macOS and Windows joiners (or one of them) open one shared
+# filesystem: each peer writes its own file, then waits until it has read
+# every other peer's, for at most INTEROP_TIMEOUT_MINUTES.
+#
+# Hosted runners can queue for a long time (macOS arm64 under capacity
+# constraints), so the peers meet before that window starts. Once a peer job
+# has built, it completes "Report interop presence", then waits in "Wait until
+# every peer is ready" (scripts/shared-fs-interop-rendezvous.mjs) until every
+# peer job has completed that step. Only then does the seed start its node
+# and publish the address, and the joiners join: every peer's window starts
+# once all of them have a runner. The wait fails at once when another peer's
+# job has finished (it failed, was cancelled, never got a runner, or a re-run
+# left it out: re-run all jobs, not only the failed ones), and when
+# INTEROP_ARRIVAL_TIMEOUT_MINUTES have passed since the peer jobs were
+# created. It finds a peer's job by the "(<machine>)" that ends its name.
+# The plan job sizes the peer jobs' time limit to hold the arrival budget as
+# well as the interop, so a late peer never finds another's job at its limit.
 on:
     pull_request:
         paths:
@@ -10,13 +27,19 @@ on:
             - "vitest.config.ts"
             - "vitest.setup.ts"
             - "packages/shared-fs/**"
+            - "scripts/shared-fs-interop-rendezvous*.mjs"
     workflow_dispatch:
         inputs:
             timeout_minutes:
-                description: "How long each peer waits for all OS files"
+                description: "How long each peer waits for all OS files, once every peer is ready"
                 required: true
                 type: number
                 default: 10
+            arrival_timeout_minutes:
+                description: "How long every peer has, from when the peer jobs are created, to get a runner and build (at least 5)"
+                required: true
+                type: number
+                default: 45
             platform:
                 description: "Join platform(s) to run with the Linux seed"
                 required: true
@@ -34,6 +57,7 @@ permissions:
 env:
     FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     INTEROP_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.timeout_minutes || '10' }}
+    INTEROP_ARRIVAL_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.arrival_timeout_minutes || '45' }}
 
 jobs:
     interop-plan:
@@ -42,6 +66,8 @@ jobs:
         outputs:
             expected: ${{ steps.plan.outputs.expected }}
             matrix: ${{ steps.plan.outputs.matrix }}
+            join_step_timeout_minutes: ${{ steps.budgets.outputs.join_step_timeout_minutes }}
+            peer_job_timeout_minutes: ${{ steps.budgets.outputs.peer_job_timeout_minutes }}
         steps:
             - name: Select peers
               id: plan
@@ -76,11 +102,60 @@ jobs:
                     echo "JSON"
                   } >> "$GITHUB_OUTPUT"
 
+            - name: Size time budgets
+              id: budgets
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  for minutes in "$INTEROP_TIMEOUT_MINUTES" "$INTEROP_ARRIVAL_TIMEOUT_MINUTES"; do
+                    if ! [[ "$minutes" =~ ^[1-9][0-9]*$ ]]; then
+                      echo "::error::Timeouts are whole minutes above zero, got '$minutes'"
+                      exit 1
+                    fi
+                  done
+                  window="$INTEROP_TIMEOUT_MINUTES"
+                  arrival="$INTEROP_ARRIVAL_TIMEOUT_MINUTES"
+                  if [ "$arrival" -lt 5 ]; then
+                    echo "::error::arrival_timeout_minutes counts from when the peer jobs are created, so it holds their setup and build: it must be at least 5, got $arrival"
+                    exit 1
+                  fi
+                  # A joiner may spend a window on write readiness and another
+                  # on the files, then reports and stops.
+                  join_step=$((2 * window + 5))
+                  # A peer job's limit adds up setup and build (10), the wait
+                  # for every peer (the arrival budget), the seed's start or a
+                  # joiner's address download (15; step limits cap both), the
+                  # interop (the join step's limit; the seed stops waiting a
+                  # window + 5 after its start) and teardown (5). The arrival
+                  # budget counts from when the peer jobs were created, so it
+                  # already holds a job's own queue, setup and build: no peer's
+                  # job reaches its limit while a peer that arrived within the
+                  # budget can still need it.
+                  peer_job=$((10 + arrival + 15 + join_step + 5))
+                  if [ "$peer_job" -gt 360 ]; then
+                    echo "::error::A peer job would need up to ${peer_job} minutes, past the 360 a hosted job may run: lower timeout_minutes or arrival_timeout_minutes"
+                    exit 1
+                  fi
+                  {
+                    echo "join_step_timeout_minutes=$join_step"
+                    echo "peer_job_timeout_minutes=$peer_job"
+                  } >> "$GITHUB_OUTPUT"
+                  echo "interop window ${window} min, arrival budget ${arrival} min; join step limit ${join_step} min, peer job limit ${peer_job} min"
+
+            - name: Checkout
+              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  sparse-checkout: scripts
+
+            - name: Test rendezvous script
+              timeout-minutes: 5
+              run: node --test scripts/shared-fs-interop-rendezvous.test.mjs
+
     seed-linux:
         name: Seed peer (linux)
         needs: interop-plan
         runs-on: ubuntu-latest
-        timeout-minutes: 20
+        timeout-minutes: ${{ fromJSON(needs.interop-plan.outputs.peer_job_timeout_minutes) }}
 
         steps:
             - name: Checkout
@@ -104,8 +179,24 @@ jobs:
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
+            - name: Report interop presence
+              shell: bash
+              run: echo "linux has built and is ready to start its node"
+
+            - name: Wait until every peer is ready
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  INTEROP_EXPECTED_MACHINES: ${{ needs.interop-plan.outputs.expected }}
+              run: |
+                  node scripts/shared-fs-interop-rendezvous.mjs \
+                    --machine linux \
+                    --expected "$INTEROP_EXPECTED_MACHINES" \
+                    --arrival-timeout-minutes "$INTEROP_ARRIVAL_TIMEOUT_MINUTES"
+
             - name: Start seed peer
               shell: bash
+              timeout-minutes: 10
               env:
                   INTEROP_EXPECTED_MACHINES: ${{ needs.interop-plan.outputs.expected }}
               run: |
@@ -144,7 +235,9 @@ jobs:
             - name: Upload shared filesystem address
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
               with:
-                  name: shared-fs-address
+                  # A re-run keeps the earlier attempts' artifacts, so the
+                  # joiners look for this attempt's address by name.
+                  name: shared-fs-address-${{ github.run_attempt }}
                   path: shared-fs-address/address.txt
                   if-no-files-found: error
 
@@ -152,7 +245,15 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
+                  # The seed exits within its window; stop waiting for one
+                  # that outlives it by 5 minutes.
+                  limit=$(( (INTEROP_TIMEOUT_MINUTES + 5) * 60 ))
                   while ! test -f interop-logs/linux-seed.exit; do
+                    if [ "$SECONDS" -ge "$limit" ]; then
+                      cat interop-logs/linux-seed.log
+                      echo "::error::The seed peer has not exited $((INTEROP_TIMEOUT_MINUTES + 5)) minutes after it started, 5 minutes past its ${INTEROP_TIMEOUT_MINUTES}-minute window"
+                      exit 1
+                    fi
                     tail -n 40 interop-logs/linux-seed.log || true
                     sleep 10
                   done
@@ -163,7 +264,7 @@ jobs:
         name: Join peer (${{ matrix.machine }})
         needs: interop-plan
         runs-on: ${{ matrix.os }}
-        timeout-minutes: 20
+        timeout-minutes: ${{ fromJSON(needs.interop-plan.outputs.peer_job_timeout_minutes) }}
         strategy:
             fail-fast: false
             matrix: ${{ fromJSON(needs.interop-plan.outputs.matrix) }}
@@ -194,8 +295,27 @@ jobs:
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
+            - name: Report interop presence
+              shell: bash
+              env:
+                  INTEROP_MACHINE: ${{ matrix.machine }}
+              run: echo "$INTEROP_MACHINE has built and is ready to start its node"
+
+            - name: Wait until every peer is ready
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  INTEROP_EXPECTED_MACHINES: ${{ needs.interop-plan.outputs.expected }}
+                  INTEROP_MACHINE: ${{ matrix.machine }}
+              run: |
+                  node scripts/shared-fs-interop-rendezvous.mjs \
+                    --machine "$INTEROP_MACHINE" \
+                    --expected "$INTEROP_EXPECTED_MACHINES" \
+                    --arrival-timeout-minutes "$INTEROP_ARRIVAL_TIMEOUT_MINUTES"
+
             - name: Download seed address
               shell: bash
+              timeout-minutes: 15
               env:
                   GH_TOKEN: ${{ github.token }}
               run: |
@@ -203,7 +323,7 @@ jobs:
                   mkdir -p shared-fs-address
                   for _ in {1..120}; do
                     rm -f shared-fs-address/address.txt
-                    if gh run download "$GITHUB_RUN_ID" -n shared-fs-address -D shared-fs-address >/dev/null 2>&1 && test -s shared-fs-address/address.txt; then
+                    if gh run download "$GITHUB_RUN_ID" -n "shared-fs-address-$GITHUB_RUN_ATTEMPT" -D shared-fs-address >/dev/null 2>&1 && test -s shared-fs-address/address.txt; then
                       cat shared-fs-address/address.txt
                       exit 0
                     fi
@@ -214,6 +334,7 @@ jobs:
 
             - name: Join shared filesystem
               shell: bash
+              timeout-minutes: ${{ fromJSON(needs.interop-plan.outputs.join_step_timeout_minutes) }}
               env:
                   INTEROP_EXPECTED_MACHINES: ${{ needs.interop-plan.outputs.expected }}
               run: |
