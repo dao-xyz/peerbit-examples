@@ -805,6 +805,17 @@ func errno(err error) int {
 			return -fuse.ENAMETOOLONG
 		case "EFBIG":
 			return -fuse.EFBIG
+		case "EXDEV":
+			return -fuse.EXDEV
+		case "ENOSPC":
+			return -fuse.ENOSPC
+		case "EPERM":
+			return -fuse.EPERM
+		case "EDQUOT":
+			if code := edquotErrno(runtime.GOOS); code != 0 {
+				return -code
+			}
+			return -fuse.ENOSPC
 		}
 	}
 	fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %v\n", err)
@@ -816,6 +827,9 @@ func errno(err error) int {
 func errnoName(result int) string {
 	if runtime.GOOS == "linux" && -result == linuxESTALE {
 		return "ESTALE"
+	}
+	if code := edquotErrno(runtime.GOOS); code != 0 && -result == code {
+		return "EDQUOT"
 	}
 	switch -result {
 	case fuse.ENOENT:
@@ -844,6 +858,12 @@ func errnoName(result int) string {
 		return "ENAMETOOLONG"
 	case fuse.EFBIG:
 		return "EFBIG"
+	case fuse.EXDEV:
+		return "EXDEV"
+	case fuse.ENOSPC:
+		return "ENOSPC"
+	case fuse.EPERM:
+		return "EPERM"
 	case fuse.ENOSYS:
 		return "ENOSYS"
 	}

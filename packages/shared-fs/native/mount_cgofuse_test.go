@@ -89,6 +89,43 @@ func TestErrnoMapsNameAndSizeLimits(t *testing.T) {
 	}
 }
 
+// A rename across the local overlay's boundary (EXDEV), a full disk (ENOSPC),
+// a refused operation (EPERM) and an exceeded quota (EDQUOT) reach the
+// kernel as themselves, not as EIO. Windows has no EDQUOT: it gets ENOSPC.
+func TestErrnoMapsCrossDeviceNoSpacePermissionAndQuota(t *testing.T) {
+	if fuse.EXDEV != 18 || fuse.ENOSPC != 28 || fuse.EPERM != 1 {
+		t.Fatalf("cgofuse numbers EXDEV %d, ENOSPC %d, EPERM %d; want 18, 28, 1", fuse.EXDEV, fuse.ENOSPC, fuse.EPERM)
+	}
+	quota, ok := map[string]struct {
+		errno int
+		name  string
+	}{
+		"linux":   {122, "EDQUOT"},
+		"darwin":  {69, "EDQUOT"},
+		"windows": {28, "ENOSPC"},
+	}[runtime.GOOS]
+	if !ok {
+		t.Skipf("no errno table for %s", runtime.GOOS)
+	}
+	for _, test := range []struct {
+		code string
+		want int
+		name string
+	}{
+		{"EXDEV", -18, "EXDEV"},
+		{"ENOSPC", -28, "ENOSPC"},
+		{"EPERM", -1, "EPERM"},
+		{"EDQUOT", -quota.errno, quota.name},
+	} {
+		if got := errno(&ipcError{Code: test.code, Message: test.code}); got != test.want {
+			t.Fatalf("%s: errno = %d, want %d", test.code, got, test.want)
+		}
+		if name := errnoName(test.want); name != test.name {
+			t.Fatalf("errnoName(%d) = %q, want %q", test.want, name, test.name)
+		}
+	}
+}
+
 // Linux caches names for up to 0.1 s, so Open can see ENOENT for a name
 // another peer just removed. Only Linux answers ESTALE, which makes the
 // kernel retry the open with a fresh lookup (and create the file for O_CREAT).
