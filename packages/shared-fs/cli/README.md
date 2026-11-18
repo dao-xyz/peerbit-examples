@@ -248,6 +248,8 @@ Native runtime prerequisites are platform-specific:
 
 Mounts keep each file's exec bit and mtime and support symlinks: `chmod`
 keeps only the exec bit, `touch` sets mtime, and `ln -s` creates a link.
+Everything at or below a directory named `node_modules` keeps every
+permission bit (see "Install dependencies in a mount").
 `chown` succeeds without storing an owner; files report the mounting user.
 Windows never sets the exec bit. It creates file and directory symlinks
 (`mklink`, `mklink /D`, `New-Item -ItemType SymbolicLink`) with a relative
@@ -581,9 +583,10 @@ Local overlay: /home/me/peerbit-shared-fs/shared-fs-local-overlay/<id>
 ```
 
 Everything at or below a directory named `node_modules`, at any depth, is an
-ordinary local file, directory or symlink, with every permission bit and
-time. It is never sent to other replicas, never waited for by
-persist-on-exit, and kept across remounts; other machines install their own.
+ordinary local file, directory or symlink: `chmod` keeps every permission
+bit, `mkdir` takes the default mode and `touch` sets the mtime. It is never
+sent to other replicas, never waited for by persist-on-exit, and kept across
+remounts; other machines install their own.
 To discard it, stop the mount and delete that directory. A mount with
 `--directory ""` (in-memory state) keeps it in a temporary directory that is
 deleted when the mount stops.

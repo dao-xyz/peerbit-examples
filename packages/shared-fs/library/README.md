@@ -1542,11 +1542,12 @@ ordinary shared name) or an ignored boundary (`ignoreCheck()` of an
 The shallowest of the two is the boundary; nested `node_modules` are
 ordinary local directories, and `/` and `/.peerbit-conflicts` are never
 local. Local paths are files, directories and symlinks with ordinary POSIX
-behaviour: every permission bit, `utimens` (on a symlink, the link's own
-time), truncate by path and by handle, `O_APPEND`, renames inside the local
-tree, `unlink` of an open file, `rmdir`. Nothing there is written to the
-shared log or the block store, waited for by `persistLocalWrites()` or shown
-in `/.peerbit-conflicts`, and none of it reaches another replica.
+behaviour: every permission bit (`mkdir` takes the host's default mode),
+`utimens` (on a symlink, the link's own time), truncate by path and by
+handle, `O_APPEND`, renames inside the local tree, `unlink` of an open file,
+`rmdir`. Nothing there is written to the shared log or the block store,
+waited for by `persistLocalWrites()` or shown in `/.peerbit-conflicts`, and
+none of it reaches another replica.
 
 - A shared entry at a local path, such as another peer's file named
   `node_modules`, is hidden in the mount. It stays in the store, in `list()`
@@ -1565,6 +1566,8 @@ in `/.peerbit-conflicts`, and none of it reaches another replica.
 - The overlay never follows a symlink on the host: a mount resolves links
   through `readlink`, and a path that passes through a link, or a `readdir`
   of one, fails with `ENOTDIR`, so nothing outside the directory is reached.
+  It remembers the host directories it has checked, so a link that another
+  process on this machine puts in place of one is followed.
 - Names created below a boundary follow the shared naming rules (255 bytes,
   no control characters, no `\`); below the boundary, names follow the
   host's case rules, so they are case-insensitive on default macOS and
@@ -1588,7 +1591,8 @@ directory at once. `localOverlayDirectory(stateDirectory, address)` is
 `<stateDirectory>/shared-fs-local-overlay/<first 32 hex of sha256(address)>`.
 
 On Windows, names the host cannot hold (`: * ? " < > |`, a trailing dot or
-space, `CON`, `NUL`, `COM1` and the other device names) fail with `EINVAL`;
+space, `CON`, `NUL`, `COM1` and the other device names) cannot be created
+(`EINVAL`) and are never found (`ENOENT`);
 symlinks need the symlink privilege (Developer Mode or an elevated account);
 a symlink created directly at a boundary name fails with `EXDEV`, because
 WinFsp first creates every link under a hidden name in its directory and
