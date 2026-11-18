@@ -16,6 +16,8 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-mount-profile-summary*.mjs"
+            - "scripts/shared-fs-npm-fixture*.mjs"
+            - "scripts/shared-fs-local-overlay-npm-smoke.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
             - "scripts/shared-fs-interop-*.mjs"
             - "scripts/shared-fs-strict-tests/**"
@@ -38,6 +40,8 @@ on:
             - "packages/shared-fs/**"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
             - "scripts/shared-fs-mount-profile-summary*.mjs"
+            - "scripts/shared-fs-npm-fixture*.mjs"
+            - "scripts/shared-fs-local-overlay-npm-smoke.mjs"
             - "scripts/shared-fs-node-go-ipc-benchmark*.mjs"
             - "scripts/shared-fs-interop-*.mjs"
             - "scripts/shared-fs-strict-tests/**"
@@ -121,6 +125,9 @@ jobs:
             - name: Test WinFsp install step
               run: node --test scripts/install-winfsp.test.mjs
 
+            - name: Test npm overlay fixture
+              run: node --test scripts/shared-fs-npm-fixture.test.mjs
+
             - name: Validate native smoke wrapper syntax
               if: runner.os != 'Windows'
               shell: bash
@@ -173,7 +180,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-mount-profile-summary*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-interop-*.mjs scripts/shared-fs-strict-tests scripts/install-winfsp.test.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-cross-os-interop.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-mount-profile-summary*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-npm-fixture*.mjs scripts/shared-fs-local-overlay-npm-smoke.mjs scripts/shared-fs-interop-*.mjs scripts/shared-fs-strict-tests scripts/install-winfsp.test.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-cross-os-interop.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
             # A change to either workflow or to an interop script runs this
             # job, so it checks the interop workflow's settings too.
