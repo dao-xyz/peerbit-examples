@@ -1,4 +1,4 @@
-/** Stamp key shared by `/.peerbit-conflicts` and every per-path conflict directory. */
+/** Stamp key of `/.peerbit-conflicts` and every directory inside it. */
 export const CONFLICTS_STAMP_KEY = "conflicts:";
 
 /** How far a stamp may run ahead of the clock. */

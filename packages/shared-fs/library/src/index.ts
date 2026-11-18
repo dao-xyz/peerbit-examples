@@ -1333,7 +1333,10 @@ export type SharedFsNamespaceChange = {
      * which hides them until content returns.
      */
     contentLost: string[];
-    /** Content heads may have forked or merged, so conflicts may have changed. */
+    /**
+     * Content heads may have forked or merged, or a version landed on a
+     * deleted node (a delete-vs-edit), so conflicts may have changed.
+     */
     versionForkOrMerge: boolean;
     /**
      * The whole view may have changed without per-document traffic: a
@@ -1376,6 +1379,52 @@ export type SharedFsNamingConflict = {
     eventIds: string[];
     /** For delete-vs-edit: content versions the delete did not observe. */
     recoverableVersionIds?: string[];
+    /**
+     * For unreachable: the node's winning parent, which is missing, deleted
+     * or unreachable itself (or on the cycle the node is on).
+     */
+    parentId?: string;
+};
+
+/**
+ * A node wherever, or whether, it is named, as a mount's conflict tree
+ * shows it (see SharedFileSystem.nodeForMount): its entry as stat() gives
+ * one at its best-effort `path`, and what makes it a conflict.
+ */
+export type SharedFsMountNode = SharedFsEntryInfo & {
+    /** When its winning naming event was made. */
+    namedAt: bigint;
+    /** Its winning naming event deletes it. */
+    deleted: boolean;
+    /** Its naming has concurrent heads. */
+    multiHead: boolean;
+    /** Live, but another claimant of its name wins (duplicate-name). */
+    shadowed: boolean;
+    /**
+     * Live, but its parents do not reach "/": "top" when its own parent is
+     * missing or deleted, or when it is on a move cycle and has the
+     * cycle's least id; "below" otherwise.
+     */
+    unreachable?: "top" | "below";
+    /** For a file: its heads grouped by bytes, in visible order. */
+    contents: SharedFsMountContent[];
+};
+
+/** One of a file's distinct contents (see SharedFsMountNode). */
+export type SharedFsMountContent = {
+    /** The first head holding these bytes. */
+    version: SharedFsVersionInfo;
+    /**
+     * Who wrote these bytes and when: of the versions reached from the
+     * heads holding them through parents holding them too (a chmod, a
+     * touch or a recorded copy keeps them), the oldest.
+     */
+    writer: Pick<
+        SharedFsVersionInfo,
+        "authorKey" | "machineLabel" | "createdAt"
+    >;
+    /** For a deleted file: its delete observed not every head holding them. */
+    unobserved: boolean;
 };
 
 export type ResolveNamingAction =
@@ -2080,6 +2129,35 @@ const contentConflictHeads = <T extends VersionLike>(heads: T[]): T[] => {
     return heads.filter(
         (head) => !seen.has(head.contentHash) && !!seen.add(head.contentHash)
     );
+};
+
+/** The older of two versions by creation time, then id. */
+const olderVersion = (a: VersionLike, b: VersionLike) =>
+    (compareBigint(a.createdAt, b.createdAt) || compareIds(a.id, b.id)) <= 0
+        ? a
+        : b;
+
+/**
+ * The version that wrote `head`'s bytes: the oldest reached from it
+ * through parents (in `rows`) holding the same bytes, else `head`.
+ */
+const bytesOrigin = (head: VersionLike, rows: Map<string, VersionLike>) => {
+    let origin = head;
+    const visited = new Set<string>();
+    while (head.contentHash !== undefined && !visited.has(origin.id)) {
+        visited.add(origin.id);
+        const same = origin.parentVersionIds.flatMap((id) => {
+            const parent = rows.get(id);
+            return parent && parent.contentHash === head.contentHash
+                ? [parent]
+                : [];
+        });
+        if (same.length === 0) {
+            break;
+        }
+        origin = same.reduce(olderVersion);
+    }
+    return origin;
 };
 
 const FILE_MODES: readonly number[] = Object.values(SHARED_FS_MODE);
@@ -5707,6 +5785,17 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     )
             ) {
                 versionForkOrMerge = true;
+            } else if (!versionForkOrMerge) {
+                // A save over a delete forks nothing and changes no name,
+                // yet the delete did not observe it: a delete-vs-edit
+                // appears or changes. Unknown naming cannot rule that out.
+                const placements = namingTrack(value.nodeId);
+                if (
+                    !placements ||
+                    !this.namingPlacement(value.nodeId, placements.graph)
+                ) {
+                    versionForkOrMerge = true;
+                }
             }
             const contentKnown =
                 track !== undefined && (track.graph.size > 0 || overlay);
@@ -9185,18 +9274,31 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     ): Promise<SharedFsMountReadSnapshot | undefined> {
         const normalized = normalizeFsPath(path);
         const resolved = await this.resolvePath(normalized);
-        if (!resolved || resolved.kind !== "file") {
-            return undefined;
-        }
+        return resolved?.kind === "file"
+            ? this.readNodeVersion(resolved.nodeId, versionId, normalized)
+            : undefined;
+    }
+
+    /**
+     * readVersionForMount of version `versionId` of file node `nodeId`,
+     * wherever or whether the node is named: a mount's conflict tree reads
+     * hidden versions through it.
+     */
+    readNodeVersionForMount(nodeId: string, versionId: string) {
+        return this.readNodeVersion(nodeId, versionId, nodeId);
+    }
+
+    private async readNodeVersion(
+        nodeId: string,
+        versionId: string,
+        label: string
+    ): Promise<SharedFsMountReadSnapshot | undefined> {
         const version = await this.getDocument<SharedFsEntry>(versionId);
-        if (
-            !(version instanceof FileVersion) ||
-            version.nodeId !== resolved.nodeId
-        ) {
+        if (!(version instanceof FileVersion) || version.nodeId !== nodeId) {
             return undefined;
         }
         this.pinVersions([version.id]);
-        const bytes = await this.readFileVersion(version, normalized);
+        const bytes = await this.readFileVersion(version, label);
         return {
             bytes,
             versionId: version.id,
@@ -9222,14 +9324,26 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
         if (resolved.kind === "file") {
             throw new SharedFsError("ENOTDIR", `Path is a file: ${normalized}`);
         }
-        const parentId =
-            resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId;
-        const children = await this.listByParentId(parentId);
+        return this.listNodeForMount(
+            resolved.kind === "root" ? ROOT_NODE_ID : resolved.nodeId,
+            normalized
+        );
+    }
+
+    /**
+     * list() of directory node `nodeId`, wherever or whether it is named,
+     * with `path` as its path: a mount's conflict tree lists hidden
+     * directories through it.
+     */
+    async listNodeForMount(
+        nodeId: string,
+        path: string
+    ): Promise<SharedFsEntryInfo[]> {
         const infos: SharedFsEntryInfo[] = [];
-        for (const child of children) {
+        for (const child of await this.listByParentId(nodeId)) {
             const info = this.entryInfoFor(
                 child.state.winner,
-                joinFsPath(normalized, child.name),
+                joinFsPath(path, child.name),
                 {
                     heads: child.heads,
                     meta: await this.headMeta(child.heads ?? []),
@@ -9241,6 +9355,123 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }
         }
         return infos.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    /**
+     * stat() of the name `name` in directory node `parentNodeId`, wherever
+     * or whether that directory is named, with `path` as its path: a mount's
+     * conflict tree looks up hidden directories' children through it.
+     */
+    async childForMount(
+        parentNodeId: string,
+        name: string,
+        path: string
+    ): Promise<SharedFsEntryInfo | undefined> {
+        const slot = await this.slotResolution(parentNodeId, name);
+        if (!slot) {
+            return undefined;
+        }
+        const heads =
+            nodeKindOf(slot.nodeId) === "file"
+                ? await this.headsForNode(slot.nodeId)
+                : undefined;
+        return this.entryInfoFor(slot.state.winner, path, {
+            heads,
+            meta: heads && (await this.headMeta(heads)),
+            namingConflict: slot.state.conflicted || slot.shadowed.length > 0,
+        });
+    }
+
+    /**
+     * Node `nodeId` wherever or whether it is named (see SharedFsMountNode);
+     * undefined for an unknown node or a file with no content yet. A
+     * mount's conflict tree shows hidden nodes, and checks one entry, by it.
+     */
+    async nodeForMount(nodeId: string): Promise<SharedFsMountNode | undefined> {
+        const state = await this.namingStateForNode(nodeId);
+        if (!state) {
+            return undefined;
+        }
+        const { winner } = state;
+        const names = [winner.name];
+        // The best-effort path (as pathForNode walks it) and, on the same
+        // walk, the first break between the node and "/".
+        let unreachable: "top" | "below" | undefined;
+        const visited = new Set([nodeId]);
+        let least = nodeId;
+        let parentId = winner.parentId;
+        while (parentId !== ROOT_NODE_ID) {
+            const own = visited.size === 1;
+            if (visited.has(parentId)) {
+                // A move cycle: its least id stands for it.
+                unreachable ??=
+                    parentId === nodeId && least === nodeId ? "top" : "below";
+                break;
+            }
+            const parent = await this.namingStateForNode(parentId);
+            if (!parent || parent.winner.deleted) {
+                unreachable ??= own ? "top" : "below";
+            }
+            if (!parent) {
+                break;
+            }
+            names.unshift(parent.winner.name);
+            visited.add(parentId);
+            least = parentId < least ? parentId : least;
+            parentId = parent.winner.parentId;
+        }
+        const path = "/" + names.join("/");
+        const heads =
+            nodeKindOf(nodeId) === "file"
+                ? await this.headsForNode(nodeId)
+                : undefined;
+        const info = this.entryInfoFor(winner, path, {
+            heads,
+            meta: heads && (await this.headMeta(heads)),
+            namingConflict: state.conflicted,
+        });
+        if (!info) {
+            return undefined;
+        }
+        const rows = heads && (await this.versionRowsFor(nodeId));
+        const observed =
+            heads && winner.deleted
+                ? new Set(
+                      (await this.getDocument<NamingEvent>(winner.id))
+                          ?.observedContentHeads
+                  )
+                : undefined;
+        return {
+            ...info,
+            namedAt: winner.createdAt,
+            deleted: winner.deleted,
+            multiHead: state.conflicted,
+            shadowed:
+                !winner.deleted &&
+                !!(
+                    await this.slotResolution(winner.parentId, winner.name)
+                )?.shadowed.includes(nodeId),
+            unreachable: winner.deleted ? undefined : unreachable,
+            contents: contentConflictHeads(heads ?? []).map((version) => {
+                const same = heads!.filter(
+                    (head) => head.contentHash === version.contentHash
+                );
+                const writer = same
+                    .map((head) => bytesOrigin(head, rows!))
+                    .reduce(olderVersion);
+                return {
+                    version: this.versionInfo(version, path, heads!),
+                    writer: {
+                        authorKey: writer.authorKey ?? "",
+                        machineLabel: writer.machineLabel ?? "",
+                        createdAt: writer.createdAt,
+                    },
+                    unobserved:
+                        !!observed &&
+                        same.some((head) => !observed.has(head.id)),
+                };
+            }),
+        };
     }
 
     /**
@@ -10456,6 +10687,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
                     nodeId: state.nodeId,
                     path: await this.pathForNode(state.nodeId, stateCache),
                     eventIds: state.heads.map((head) => head.id),
+                    parentId: state.winner.parentId,
                 });
             }
         }
@@ -19245,6 +19477,26 @@ export class SharedFsHandle {
 
     readVersionForMount(path: string, versionId: string) {
         return this.program.readVersionForMount(path, versionId);
+    }
+
+    /** See SharedFileSystem.readNodeVersionForMount. */
+    readNodeVersionForMount(nodeId: string, versionId: string) {
+        return this.program.readNodeVersionForMount(nodeId, versionId);
+    }
+
+    /** See SharedFileSystem.nodeForMount. */
+    nodeForMount(nodeId: string) {
+        return this.program.nodeForMount(nodeId);
+    }
+
+    /** See SharedFileSystem.listNodeForMount. */
+    listNodeForMount(nodeId: string, path: string) {
+        return this.program.listNodeForMount(nodeId, path);
+    }
+
+    /** See SharedFileSystem.childForMount. */
+    childForMount(parentNodeId: string, name: string, path: string) {
+        return this.program.childForMount(parentNodeId, name, path);
     }
 
     mkdir(path: string) {

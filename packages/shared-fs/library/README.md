@@ -1125,7 +1125,7 @@ peerbit-fs install-adapter
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
-peerbit-fs conflicts <address>
+peerbit-fs conflicts <address> [--fail-if-any]
 peerbit-fs naming-conflicts <address>
 peerbit-fs resolve-conflict <address> <path> <version-id>
 peerbit-fs resolve-naming-conflict <address> <node-id> <keep|restore|delete|move|merge-directory>
@@ -1313,8 +1313,9 @@ or last saw its names change, not its creation time, so a remount makes git's
 untracked cache rescan once; `utimens` on a directory is ignored. git's
 `core.untrackedCache` is safe for a `.git` one peer uses; set it to `false`,
 not `keep`, for a `.git` several peers use. `list()` and `stat()` still report
-a directory's creation time in `updatedAt`. Conflict copies, links
-included, are read-only regular `0644` files. Modes and owners are not an
+a directory's creation time in `updatedAt`. Conflict copies in
+`/.peerbit-conflicts` (see [Conflicts](#conflicts)), links included, are
+read-only regular `0644` files. Modes and owners are not an
 authorization boundary; use Shared FS writer authorization. The external
 adapter's OS access callback checks existence and the exec bit but not read or
 write masks, so `test -w` is advisory. Windows shows directories as `0777` and
@@ -1583,11 +1584,68 @@ with its kernel extension approved, so it runs on demand on a Scaleway Mac.
 
 Concurrent saves remain addressable versions. The visible file version is only
 a deterministic display choice. Conflicting versions are listed through
-`conflicts()` and exposed to mount adapters below:
+`conflicts()`, naming conflicts through `namingConflicts()`, and a native mount
+shows both in one read-only tree, one entry per hidden version or node:
 
 ```text
-/.peerbit-conflicts/<encoded-path>/<version-id>
+/.peerbit-conflicts/<kind> <path> <writer> <time> <hash>[.<ext>]
+
+content docs／notes.txt laptop 20261116T101500Z 3f2a9c1b7d4e.txt
+duplicate-name notes.txt desktop 20261116T101502Z 9a8b7c6d5e4f.txt
+delete-vs-edit plan.md desktop 20261116T101733Z 0c1d2e3f4a5b.md
+unreachable docs／drafts desktop 20261116T102000Z 77aa88bb99cc/today.md
 ```
+
+- `content`: each distinct content among the heads of a file in conflict, the
+  visible one too, so two entries diff as the conflict.
+- `delete-vs-edit`: each content a delete did not see.
+- `duplicate-name`: each claimant a name's winner shadows.
+- `multi-head`: a node whose concurrent renames disagree, as it is now.
+- `unreachable`: a node whose parents no longer reach `/` (a parent was
+  deleted, or concurrent moves made a cycle). Only the top-most such node is an
+  entry; the rest is inside it, and browsing stops where a cycle repeats.
+
+A file entry is a read-only regular `0644` file with that version's bytes (a
+link's target as text), size and mtime; a directory entry shows the hidden
+directory as it is now. A name gives the kind, the original path (`/` shown as
+`／`, cut at its start to fit), the writer (machine label, else `key-` and a
+hash of its key), the writer's UTC time, 12 hex digits of SHA-256 of the kind
+and id, and the original extension. A `content` or `delete-vs-edit` entry's id
+is its file and bytes, and its writer and time are those of the save that
+brought those bytes in, so a `chmod`, `touch` or recorded copy that keeps the
+bytes keeps the name; a node entry's id is the node, and its writer and time
+are those of its name. Names are valid on Windows, macOS and Linux
+(lookalikes replace characters a name cannot hold; at most 160 bytes) and
+unique even ignoring case. One changes when its path does or, for a node
+entry, when the node is renamed again. A `content` or `delete-vs-edit` entry's
+writer and time also move to an older save of the same bytes that arrives
+late, or to a newer one once GC retires that save, so replicas that hold
+different history can name it differently; its hash stays. Creating, writing,
+truncating, `chmod`, `utimens`, renaming into, out of or within, unlinking and
+removing directories there fail with `EROFS`, also before the mount's first
+view settles. As everywhere in a mount, `chown`, an atime-only `touch -a` and,
+on Windows, `chmod` succeed and change nothing.
+
+`/.peerbit-conflicts` is never listed in `/`, so `ls -a`, Finder, Explorer, git
+(`status`, `add -A`, `clean`), backup tools and indexers do not walk or copy
+hidden versions. Like ZFS's hidden `.zfs`, it is always there by name
+(`cd <mountpoint>/.peerbit-conflicts`), and
+`peerbit-fs conflicts --fail-if-any` tells whether it has entries. Listing the
+tree scans every conflict (`conflicts()`, `namingConflicts()`, then each node
+in conflict; about 1 s per 10k files) the first time after a change that may
+alter it, as `onNamespaceChange()` reports one: a create, delete or rename
+anywhere, a version that may fork or merge a file (a save to a file this
+process has not read counts) or is its first, a removed version, or a reset.
+A target without that feed scans on every read. Listing `/` or looking up the
+tree itself never scans, and looking up one
+entry (`stat`, `open`, `cd`) waits for no scan: a name not of the form above
+fails with `ENOENT` at once, and one the last scan held is checked on its own
+node. Only a mount's first lookup, or a well-formed name the last scan did not
+hold, scans. An entry leaves the tree once `resolveConflict()` or
+`resolveNamingConflict()` (or the CLI) settles its conflict. A target with
+artifact-ignore rules (`IgnoreAwareFs`) applies them in the tree as in `/`: a
+conflict on an ignored path is no entry unless the path is the rule's boundary,
+and a hidden directory lists its children as `list()` does.
 
 A file is in conflict only when its heads hold two or more different contents,
 and `conflicts()` lists one version per content. Heads that differ only in mode

@@ -4,6 +4,7 @@ import {
     SharedFsHandle,
     type ResolveNamingAction,
     type ResolveNamingConflictOptions,
+    type SharedFsEntryInfo,
     type SharedFsMountNamespaceMutation,
     type SharedFsMountNamespaceMutationResult,
     type SharedFsNamespaceChange,
@@ -386,9 +387,16 @@ export class IgnoreAwareFs extends SharedFsHandle {
 
     async list(path?: string, options?: { includeIgnored?: boolean }) {
         const entries = await super.list(path);
-        if (options?.includeIgnored) {
-            return entries;
-        }
+        return options?.includeIgnored ? entries : this.listed(entries);
+    }
+
+    /** list() of a hidden directory: ignored children as list() shows them. */
+    async listNodeForMount(nodeId: string, path: string) {
+        return this.listed(await super.listNodeForMount(nodeId, path));
+    }
+
+    /** The entries list() shows: ignored ones hidden, or annotated. */
+    private listed(entries: SharedFsEntryInfo[]) {
         const rules = this.ignorePolicy.current();
         const showLeaked = this.policyOptions.showLeaked ?? "hide";
         const out: typeof entries = [];
@@ -404,15 +412,36 @@ export class IgnoreAwareFs extends SharedFsHandle {
     }
 
     async stat(path: string) {
-        const info = await super.stat(path);
-        if (!info) {
-            return info;
-        }
-        const verdict = this.effectiveVerdict(
-            this.ignorePolicy.current(),
-            info.path
-        );
-        return verdict.ignored ? { ...info, ignoredLeak: true } : info;
+        return this.marked(await super.stat(path));
+    }
+
+    /** stat() of a hidden directory's child: annotated as stat() does. */
+    async childForMount(parentNodeId: string, name: string, path: string) {
+        return this.marked(await super.childForMount(parentNodeId, name, path));
+    }
+
+    /**
+     * A hidden node, left out on an ignored path as conflicts() and
+     * namingConflicts() leave its conflicts out, so a mount's check of one
+     * conflict-tree entry agrees with its scan.
+     */
+    async nodeForMount(nodeId: string) {
+        const node = await super.nodeForMount(nodeId);
+        const verdict =
+            node &&
+            this.effectiveVerdict(this.ignorePolicy.current(), node.path);
+        return verdict?.ignored && verdict.boundary !== node!.path
+            ? undefined
+            : node;
+    }
+
+    /** `info`, annotated when its path is ignored. */
+    private marked<T extends SharedFsEntryInfo>(info: T | undefined) {
+        return info &&
+            this.effectiveVerdict(this.ignorePolicy.current(), info.path)
+                .ignored
+            ? { ...info, ignoredLeak: true }
+            : info;
     }
 
     async conflicts(

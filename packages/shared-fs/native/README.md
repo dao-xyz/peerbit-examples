@@ -339,9 +339,9 @@ mtime on every file version. The adapter maps the POSIX calls onto them:
   clock moves on, and the next stat after that shows it. Some events move a
   directory's time without changing its names, such as garbage collection of
   history this mount never read or a bootstrap view switch, and
-  `.peerbit-conflicts` moves with every name change, since one can reveal or
-  hide a conflicted file; tools then rescan once. `utimens` on a directory
-  succeeds and changes nothing.
+  `.peerbit-conflicts` moves with every name change, fork, merge and first or
+  lost content, since each can add or remove an entry; tools then rescan once.
+  `utimens` on a directory succeeds and changes nothing.
 - git's `core.untrackedCache` is safe for a `.git` that one peer uses. For a
   `.git` that several peers use, set it to `false` explicitly, not `keep`:
   directory times and inode numbers are per mount, so one peer's cache must not

@@ -301,6 +301,44 @@ try {
   [System.IO.File]::Delete($LinkTarget)
   [System.IO.Directory]::Delete($LinkRoot)
 
+  # Conflict copies live in \.peerbit-conflicts: never listed in the root,
+  # always there by name, and read-only. Each refusal's message is reported.
+  $ConflictsPath = Join-Path $MountRoot ".peerbit-conflicts"
+  $RootNames = @(Get-ChildItem -LiteralPath $MountRoot -Force | ForEach-Object { $_.Name })
+  if ($RootNames -contains ".peerbit-conflicts") {
+    throw ".peerbit-conflicts must not be listed in the mount root"
+  }
+  if (-not (Test-Path -LiteralPath $ConflictsPath -PathType Container)) {
+    throw ".peerbit-conflicts is not reachable by name"
+  }
+  $ConflictNames = @(Get-ChildItem -LiteralPath $ConflictsPath -Force | ForEach-Object { $_.Name })
+  if ($ConflictNames.Count -ne 0) {
+    throw "unexpected conflict entries: $($ConflictNames -join ", ")"
+  }
+  $ProbePath = Join-Path $MountRoot "docs\conflicts-probe.txt"
+  Set-Content -NoNewline -Path $ProbePath -Value "probe"
+  $Attempts = [ordered]@{
+    "create a file" = { [System.IO.File]::WriteAllText((Join-Path $ConflictsPath "new.txt"), "x") }
+    "create a directory" = { [System.IO.Directory]::CreateDirectory((Join-Path $ConflictsPath "new")) | Out-Null }
+    "move a file in" = { [System.IO.File]::Move($ProbePath, (Join-Path $ConflictsPath "in.txt")) }
+  }
+  foreach ($Attempt in $Attempts.GetEnumerator()) {
+    $Refused = $false
+    try {
+      & $Attempt.Value
+    } catch {
+      $Refused = $true
+      Write-Host "conflict tree refused to $($Attempt.Key): $($_.Exception.Message)"
+    }
+    if (-not $Refused) {
+      throw "conflict tree allowed to $($Attempt.Key)"
+    }
+  }
+  if ((Get-Content -Raw -LiteralPath $ProbePath) -ne "probe") {
+    throw "a refused move into .peerbit-conflicts changed $ProbePath"
+  }
+  [System.IO.File]::Delete($ProbePath)
+
   $DocsPath = Join-Path $MountRoot "docs"
   Remove-Item -Force -Path $DocsPath
   if (Test-Path -LiteralPath $DocsPath) {
