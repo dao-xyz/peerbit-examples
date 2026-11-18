@@ -15,7 +15,7 @@ import type {
     runSharedFsBenchmark,
 } from "@peerbit/shared-fs";
 import { multiaddr } from "@multiformats/multiaddr";
-import chalk from "chalk";
+import chalk, { Chalk, type ChalkInstance } from "chalk";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +25,18 @@ import {
     mountExternalNativeAdapter,
     reportAdapterExit,
 } from "./external-native-adapter.js";
+import {
+    callMountControl,
+    MountControlRefusal,
+    MountRunningError,
+    processAlive,
+    readMountControl,
+    startMountControl,
+    type MountControl,
+    type MountControlHandler,
+    type MountControlOutput,
+    type MountControlPrint,
+} from "./mount-control.js";
 import {
     describeNativeAdapterInstall,
     installNativeAdapter,
@@ -42,9 +54,65 @@ let sharedFsRuntimePromise: Promise<SharedFsRuntime> | undefined;
 const loadSharedFsRuntime = () =>
     (sharedFsRuntimePromise ??= import("@peerbit/shared-fs"));
 
-const createPeerbitForCli = async (directory?: string) => {
+/** classic-level's error for a database another process holds open. */
+const isLockedDirectory = (error: unknown): boolean =>
+    (error as { code?: unknown })?.code === "LEVEL_LOCKED" ||
+    (error instanceof Error && isLockedDirectory(error.cause));
+
+/**
+ * Opens Peerbit on the state directory. One that a mount holds says so,
+ * naming the mount's pid, instead of failing on the database lock;
+ * `unreachable` is why the command could not run through that mount.
+ */
+const createPeerbitForCli = async (
+    directory: string | undefined,
+    command: string,
+    unreachable?: string
+) => {
     const { Peerbit } = await loadSharedFsRuntime();
-    return Peerbit.create({ directory });
+    try {
+        return await Peerbit.create({ directory });
+    } catch (error) {
+        const mount =
+            directory === undefined || !isLockedDirectory(error)
+                ? undefined
+                : readMountControl(directory);
+        if (!mount || !processAlive(mount.pid)) throw error;
+        throw new MountRunningError(
+            mount.pid,
+            unreachable === undefined
+                ? `peerbit-fs ${command} does not run through it: stop the mount first`
+                : `peerbit-fs ${command} could not reach it (${unreachable}): stop the mount to run the command here`
+        );
+    }
+};
+
+/**
+ * Where a command prints: this process's console, or the client of a
+ * mount's control endpoint, which prints it the same way.
+ */
+type CliOutput = {
+    chalk: ChalkInstance;
+    log(text: string): void;
+    warn(text: string): void;
+    error(text: string): void;
+    /** Raw stderr, for the write-readiness progress line. */
+    stderr: ProgressStream;
+    /** Sets the command's exit status. */
+    exit(code: number): void;
+    /** Through a mount: aborts once its client went away or it stops. */
+    signal?: AbortSignal;
+};
+
+const consoleOutput: CliOutput = {
+    chalk,
+    log: (text) => console.log(text),
+    warn: (text) => console.warn(text),
+    error: (text) => console.error(text),
+    stderr: process.stderr,
+    exit: (code) => {
+        process.exitCode = code;
+    },
 };
 
 const normalizeCliFsPath = async (value: string) => {
@@ -404,6 +472,12 @@ const closeMountProfile = async (
  */
 export const stopMountSession = async (
     session: {
+        /**
+         * The control endpoint: it refuses commands from the start, and is
+         * removed just before Peerbit stops, while this process still holds
+         * the state directory (a mount started after that writes its own).
+         */
+        control?: Pick<MountControl, "stopServing" | "close">;
         mounted?: { unmount(): Promise<void> };
         ipc?: { close(): Promise<void> };
         /** Drained (open files commit), then detached from the namespace feed. */
@@ -425,6 +499,7 @@ export const stopMountSession = async (
             if (!options.ignoreErrors) process.exitCode = 1;
         }
     };
+    await step(() => session.control?.stopServing());
     await step(() => session.mounted?.unmount());
     await step(() => session.ipc?.close());
     const drained = await step(() => session.backend?.drain?.());
@@ -437,6 +512,7 @@ export const stopMountSession = async (
     await step(() => session.backend?.dispose?.());
     await step(() => closeMountProfile(session.profileWriter));
     await step(() => session.persist?.());
+    await step(() => session.control?.close());
     await step(() => session.stopPeerbit());
     if (failures.length && !options.ignoreErrors) throw failures[0];
 };
@@ -687,8 +763,8 @@ const namingConflictForJson = (conflict: SharedFsNamingConflict) => ({
 const CONFLICTS_FOUND_EXIT_CODE = 3;
 const CONFLICTS_UNVERIFIED_EXIT_CODE = 4;
 
-const printJson = (value: unknown) => {
-    console.log(
+const printJson = (value: unknown, out: CliOutput = consoleOutput) => {
+    out.log(
         JSON.stringify(
             value,
             (_key, nested) =>
@@ -1173,7 +1249,7 @@ const assumeCompleteAfterTimeout = async (
     wait: CliWriteReadyWait,
     timeout: { message?: unknown },
     timedOut: string,
-    stream: ProgressStream
+    out: CliOutput
 ) => {
     try {
         await fsHandle.assumeComplete();
@@ -1192,21 +1268,22 @@ const assumeCompleteAfterTimeout = async (
         throw error;
     }
     const reason = writeReadyTimeoutReason(timeout);
-    stream.write(
-        `${chalk.yellow(
+    out.stderr.write(
+        `${out.chalk.yellow(
             `Write readiness was not proven within ${wait.timeoutMs} ms${reason ? `: ${reason}` : ""}. --assume-complete: assuming this replica's view is complete. Rows held only by peers it did not reconcile with are not in it, and writes made now can conflict with them.`
         )}\n`
     );
 };
 
 /**
- * awaitWriteReady for a command, with the progress line on `stream` while
- * an open that was not writable waits. An ETIMEDOUT becomes
+ * awaitWriteReady for a command, with the progress line on the output's
+ * stderr while an open that was not writable waits. An ETIMEDOUT becomes
  * writeReadyTimeoutMessage, the --assume-complete hint and `note` (the
  * library error is its cause), or, with --assume-complete and no answer
  * coming, assumeComplete(); with the flag while a required peer can still
  * answer, the message says why it was not applied. Resolves with
- * bootstrapStatus() once writable.
+ * bootstrapStatus() once writable. Through a mount, the wait ends when its
+ * client goes away.
  */
 const awaitCliWriteReady = async (
     fsHandle: Pick<
@@ -1214,20 +1291,20 @@ const awaitCliWriteReady = async (
         "awaitWriteReady" | "assumeComplete" | "bootstrapStatus"
     >,
     wait: CliWriteReadyWait,
-    stream: ProgressStream = process.stderr
+    out: CliOutput = consoleOutput
 ): Promise<BootstrapStatus> => {
     const progress = fsHandle.bootstrapStatus().writeReady
         ? undefined
         : createReadinessProgress(
-              stream,
+              out.stderr,
               (await loadSharedFsRuntime()).describeReadiness
           );
     try {
-        await fsHandle.awaitWriteReady(
-            progress
-                ? { timeout: wait.timeoutMs, onProgress: progress.update }
-                : { timeout: wait.timeoutMs }
-        );
+        await fsHandle.awaitWriteReady({
+            timeout: wait.timeoutMs,
+            ...(progress ? { onProgress: progress.update } : {}),
+            ...(out.signal ? { signal: out.signal } : {}),
+        });
     } catch (error: any) {
         progress?.end();
         if (error?.code !== "ETIMEDOUT") throw error;
@@ -1254,13 +1331,7 @@ const awaitCliWriteReady = async (
                 { cause: error }
             );
         }
-        await assumeCompleteAfterTimeout(
-            fsHandle,
-            wait,
-            error,
-            timedOut,
-            stream
-        );
+        await assumeCompleteAfterTimeout(fsHandle, wait, error, timedOut, out);
         return fsHandle.bootstrapStatus();
     }
     progress?.end();
@@ -1318,9 +1389,10 @@ const assertWriteReadyTimeout = (
 const awaitConflictResolutionReady = async (
     fsHandle: CliFs,
     peerbit: Peerbit,
-    wait: CliWriteReadyWait
+    wait: CliWriteReadyWait,
+    out: CliOutput
 ) => {
-    await awaitCliWriteReady(fsHandle, wait);
+    await awaitCliWriteReady(fsHandle, wait, out);
     await fsHandle.awaitBootstrapConverged();
     if (
         fsHandle.accessControlled &&
@@ -1331,6 +1403,728 @@ const awaitConflictResolutionReady = async (
         );
     }
 };
+
+/**
+ * The filesystem a served command runs on: the one it opened itself, or,
+ * through its control endpoint, a running mount's.
+ */
+type LiveFs = { fsHandle: CliFs; peerbit: Peerbit };
+
+type ConflictViewArgs = {
+    address: string;
+    path?: string;
+    json: boolean;
+    replicate: boolean;
+};
+
+type ResolutionArgs = {
+    address: string;
+    writeReadyTimeoutMs: number;
+    assumeComplete: boolean;
+    json: boolean;
+};
+
+type WriterArgs = { address: string; publicKey: string };
+
+const runStatus = async (
+    { fsHandle }: LiveFs,
+    argv: {
+        address: string;
+        json: boolean;
+        includeConflicts: boolean;
+        replicate: boolean;
+        /** Read where the command was run, before the filesystem opened. */
+        nativeMount: NativeStatus;
+    },
+    out: CliOutput
+) => {
+    const { nativeMount } = argv;
+    const bootstrapBefore = fsHandle.bootstrapStatus();
+    const rootEntries = await fsHandle.list("/");
+    // Whole-store conflict scans are intentionally opt-in: they scale with
+    // retained metadata and can dominate a routine readiness/status check on
+    // a large workspace.
+    const conflictStatus = argv.includeConflicts
+        ? {
+              content: await fsHandle.conflicts(undefined, {
+                  allowPartial: true,
+              }),
+              naming: await fsHandle.namingConflicts(undefined, {
+                  allowPartial: true,
+              }),
+          }
+        : undefined;
+    const bootstrapAfter = fsHandle.bootstrapStatus();
+    const bootstrapStateChangedDuringScan =
+        bootstrapBefore.phase !== bootstrapAfter.phase ||
+        bootstrapBefore.pendingDocs !== bootstrapAfter.pendingDocs ||
+        bootstrapBefore.snapshotCoverageVerified !==
+            bootstrapAfter.snapshotCoverageVerified ||
+        bootstrapBefore.writeReady !== bootstrapAfter.writeReady;
+    const conflictViewPartial = conflictScanIsPartial(
+        argv.replicate !== false,
+        bootstrapBefore,
+        bootstrapAfter
+    );
+    const gc = fsHandle.gcStatus();
+    if (argv.json) {
+        printJson(
+            {
+                nativeMount,
+                filesystem: {
+                    address: fsHandle.address,
+                    bootstrap: {
+                        phase: bootstrapAfter.phase,
+                        pendingDocs: bootstrapAfter.pendingDocs,
+                        snapshotCoverageVerified:
+                            bootstrapAfter.snapshotCoverageVerified,
+                        writeReady: bootstrapAfter.writeReady,
+                        writeReadinessSource:
+                            bootstrapAfter.writeReadinessSource ?? null,
+                        // Which peers a join waits for and why (plain data),
+                        // or null without a join.
+                        readiness: bootstrapAfter.readiness ?? null,
+                        // A warm replica's freshness check, or null without
+                        // one. A short run checks only if a peer asks it; a
+                        // mount checks at once.
+                        freshness: bootstrapAfter.freshness ?? null,
+                    },
+                    localPublicKey: fsHandle.localPublicKey,
+                    accessControlled: fsHandle.accessControlled,
+                    rootKey: fsHandle.rootKey ?? null,
+                    rootEntries: rootEntries.length,
+                    conflicts: conflictStatus
+                        ? {
+                              partial: conflictViewPartial,
+                              scope: "local-replica",
+                              bootstrapPhaseBefore: bootstrapBefore.phase,
+                              bootstrapPhaseAfter: bootstrapAfter.phase,
+                              bootstrapStateChangedDuringScan,
+                              contentCount: conflictStatus.content.length,
+                              namingCount: conflictStatus.naming.length,
+                              content: conflictStatus.content.map(
+                                  contentConflictForJson
+                              ),
+                              naming: conflictStatus.naming.map(
+                                  namingConflictForJson
+                              ),
+                          }
+                        : null,
+                    gc: {
+                        scheduled: gc.scheduled,
+                        nextRunAtMs: gc.nextRunAtMs ?? null,
+                        consecutiveFailures: gc.consecutiveFailures,
+                    },
+                },
+            },
+            out
+        );
+        return;
+    }
+    out.log(`address: ${fsHandle.address}`);
+    if (bootstrapAfter.phase !== "off") {
+        out.log(
+            `bootstrap: ${bootstrapAfter.phase} (${bootstrapAfter.pendingDocs} documents pending)`
+        );
+    }
+    if (!bootstrapAfter.writeReady && bootstrapAfter.readiness) {
+        // status does not wait: this is the join's reason right now.
+        const { describeReadiness } = await loadSharedFsRuntime();
+        out.log(
+            `write readiness: pending (${describeReadiness(bootstrapAfter.readiness)})`
+        );
+    } else {
+        out.log(
+            `write readiness: ${bootstrapAfter.writeReady ? "ready" : "pending"}${bootstrapAfter.writeReadinessSource ? ` (${bootstrapAfter.writeReadinessSource})` : ""}`
+        );
+    }
+    const freshness = freshnessLine(bootstrapAfter);
+    if (freshness) out.log(freshness);
+    out.log(`local public key: ${fsHandle.localPublicKey}`);
+    out.log(`access controlled: ${fsHandle.accessControlled ? "yes" : "no"}`);
+    if (fsHandle.rootKey) {
+        out.log(`root key: ${fsHandle.rootKey}`);
+    }
+    out.log(`root entries: ${rootEntries.length}`);
+    if (conflictStatus) {
+        const partial = conflictViewPartial ? " (partial bootstrap view)" : "";
+        out.log(`conflicts: ${conflictStatus.content.length}${partial}`);
+        out.log(`naming conflicts: ${conflictStatus.naming.length}${partial}`);
+    } else {
+        out.log("conflicts: not scanned (use --include-conflicts)");
+        out.log("naming conflicts: not scanned (use --include-conflicts)");
+    }
+    const nextIn = gc.nextRunAtMs
+        ? ` (next run in ${Math.max(0, Math.round((gc.nextRunAtMs - Date.now()) / 1000))}s)`
+        : "";
+    out.log(`gc schedule: ${gc.scheduled ? `on${nextIn}` : "off"}`);
+};
+
+const runConflicts = async (
+    { fsHandle }: LiveFs,
+    argv: ConflictViewArgs & { failIfAny: boolean; allowUnverified: boolean },
+    out: CliOutput
+) => {
+    // Conflict listings need the converged view.
+    const convergence = await fsHandle.awaitBootstrapConverged();
+    const bootstrap = fsHandle.bootstrapStatus();
+    const snapshotCoverageVerified =
+        argv.replicate !== false &&
+        convergence.verified &&
+        bootstrap.phase === "converged" &&
+        bootstrap.snapshotCoverageVerified;
+    const conflicts = await fsHandle.conflicts(argv.path);
+    // The gate counts every kind; the listing stays content.
+    const namingConflicts = argv.failIfAny
+        ? await fsHandle.namingConflicts(argv.path)
+        : [];
+    if (argv.failIfAny && conflicts.length + namingConflicts.length > 0) {
+        out.exit(CONFLICTS_FOUND_EXIT_CODE);
+    } else if (
+        argv.failIfAny &&
+        !snapshotCoverageVerified &&
+        !argv.allowUnverified
+    ) {
+        // No conflict here proves none only in a verified view: a gate must
+        // not pass on a partial one.
+        out.exit(CONFLICTS_UNVERIFIED_EXIT_CODE);
+    }
+    if (argv.json) {
+        printJson(
+            {
+                address: fsHandle.address,
+                path: argv.path ? await normalizeCliFsPath(argv.path) : null,
+                view: {
+                    fullReplica: argv.replicate !== false,
+                    bootstrapPhase: bootstrap.phase,
+                    snapshotCoverageVerified,
+                },
+                conflicts: conflicts.map(contentConflictForJson),
+                ...(argv.failIfAny
+                    ? {
+                          namingConflicts: namingConflicts.map(
+                              namingConflictForJson
+                          ),
+                      }
+                    : {}),
+            },
+            out
+        );
+        return;
+    }
+    if (!snapshotCoverageVerified) {
+        out.warn(
+            out.chalk.yellow(
+                "Conflict results reflect a settled local view without a verified full-replica bootstrap; do not treat absence as proof of no remote conflict."
+            )
+        );
+    }
+    if (conflicts.length + namingConflicts.length === 0) {
+        out.log("No conflicts");
+        return;
+    }
+    for (const conflict of conflicts) {
+        out.log(out.chalk.bold(conflict.path));
+        out.log(`  node: ${conflict.nodeId}`);
+        for (const [index, version] of conflict.versions.entries()) {
+            out.log(
+                `  ${version.id} ${version.size} bytes ${version.machineLabel} ${version.authorKey}${index === 0 ? " (visible)" : ""}`
+            );
+        }
+    }
+    if (namingConflicts.length > 0) {
+        out.log(
+            out.chalk.bold(
+                `naming conflicts (details: peerbit-fs naming-conflicts ${fsHandle.address}):`
+            )
+        );
+        for (const conflict of namingConflicts) {
+            out.log(`  ${conflict.type} ${conflict.path}`);
+        }
+    }
+};
+
+const runNamingConflicts = async (
+    { fsHandle }: LiveFs,
+    argv: ConflictViewArgs,
+    out: CliOutput
+) => {
+    const convergence = await fsHandle.awaitBootstrapConverged();
+    const bootstrap = fsHandle.bootstrapStatus();
+    const snapshotCoverageVerified =
+        argv.replicate !== false &&
+        convergence.verified &&
+        bootstrap.phase === "converged" &&
+        bootstrap.snapshotCoverageVerified;
+    const conflicts = await fsHandle.namingConflicts(argv.path);
+    if (argv.json) {
+        printJson(
+            {
+                address: fsHandle.address,
+                path: argv.path ? await normalizeCliFsPath(argv.path) : null,
+                view: {
+                    fullReplica: argv.replicate !== false,
+                    bootstrapPhase: bootstrap.phase,
+                    snapshotCoverageVerified,
+                },
+                conflicts: conflicts.map(namingConflictForJson),
+            },
+            out
+        );
+        return;
+    }
+    if (!snapshotCoverageVerified) {
+        out.warn(
+            out.chalk.yellow(
+                "Naming conflict results reflect a settled local view without a verified full-replica bootstrap; do not treat absence as proof of no remote conflict."
+            )
+        );
+    }
+    if (conflicts.length === 0) {
+        out.log("No naming conflicts");
+        return;
+    }
+    for (const conflict of conflicts) {
+        out.log(out.chalk.bold(`${conflict.type} ${conflict.path}`));
+        out.log(`  node: ${conflict.nodeId}`);
+        out.log(`  events: ${[...conflict.eventIds].sort().join(", ")}`);
+        if (conflict.shadowedNodeIds?.length) {
+            out.log(
+                `  shadowed nodes: ${[...conflict.shadowedNodeIds].sort().join(", ")}`
+            );
+        }
+        if (conflict.recoverableVersionIds?.length) {
+            out.log(
+                `  recoverable versions: ${[...conflict.recoverableVersionIds].sort().join(", ")}`
+            );
+        }
+    }
+};
+
+const runResolveConflict = async (
+    { fsHandle, peerbit }: LiveFs,
+    argv: ResolutionArgs & { path: string; versionId: string },
+    out: CliOutput
+) => {
+    await awaitConflictResolutionReady(
+        fsHandle,
+        peerbit,
+        {
+            timeoutMs: argv.writeReadyTimeoutMs,
+            subject: "resolve-conflict did not establish a safe write view",
+            offersAssumeComplete: true,
+            assumeComplete: argv.assumeComplete,
+        },
+        out
+    );
+    const normalizedPath = await normalizeCliFsPath(argv.path);
+    const visible = await fsHandle.conflicts(normalizedPath);
+    // conflicts() lists one version per content; every head is selectable
+    // and becomes a parent of the resolution.
+    const observedHeadVersionIds = [
+        ...((await fsHandle.stat(normalizedPath))?.headVersionIds ?? []),
+    ].sort();
+    if (
+        !visible.some((conflict) => conflict.path === normalizedPath) ||
+        !observedHeadVersionIds.includes(argv.versionId)
+    ) {
+        throw new Error(
+            `Version ${argv.versionId} is not a current conflict head for ${normalizedPath}; rerun peerbit-fs conflicts before retrying`
+        );
+    }
+    out.signal?.throwIfAborted();
+    const resolution = await fsHandle.resolveConflict(
+        normalizedPath,
+        argv.versionId
+    );
+    const supersededHeadVersionIds = [...resolution.parentVersionIds].sort();
+    const headSetChangedDuringResolution =
+        observedHeadVersionIds.join("\0") !==
+        supersededHeadVersionIds.join("\0");
+    const result = {
+        address: fsHandle.address,
+        path: resolution.path,
+        nodeId: resolution.nodeId,
+        selectedVersionId: argv.versionId,
+        observedHeadVersionIds,
+        supersededHeadVersionIds,
+        headSetChangedDuringResolution,
+        resolution: versionForJson(resolution),
+    };
+    if (argv.json) {
+        printJson(result, out);
+        return;
+    }
+    out.log(
+        out.chalk.green(`Published content resolution for ${resolution.path}`)
+    );
+    out.log(`selected version: ${argv.versionId}`);
+    out.log(`resolution version: ${resolution.id}`);
+    out.log(`superseded heads: ${supersededHeadVersionIds.join(", ")}`);
+    if (headSetChangedDuringResolution) {
+        out.log(
+            out.chalk.yellow(
+                "The visible head set changed during resolution; inspect conflicts again."
+            )
+        );
+    }
+};
+
+const runResolveNamingConflict = async (
+    { fsHandle, peerbit }: LiveFs,
+    argv: ResolutionArgs & { nodeId: string; action: string; to?: string },
+    out: CliOutput
+) => {
+    const action = await namingActionFromCli(argv.action, argv.to);
+    await awaitConflictResolutionReady(
+        fsHandle,
+        peerbit,
+        {
+            timeoutMs: argv.writeReadyTimeoutMs,
+            subject:
+                "resolve-naming-conflict did not establish a safe write view",
+            offersAssumeComplete: true,
+            assumeComplete: argv.assumeComplete,
+        },
+        out
+    );
+    const observedConflicts = conflictsInvolvingNode(
+        await fsHandle.namingConflicts(),
+        argv.nodeId
+    );
+    if (observedConflicts.length === 0) {
+        throw new Error(
+            `Node ${argv.nodeId} is not part of a currently visible naming conflict; rerun peerbit-fs naming-conflicts before retrying`
+        );
+    }
+    const expectedEventIds = [
+        ...new Set(observedConflicts.flatMap((conflict) => conflict.eventIds)),
+    ].sort();
+    out.signal?.throwIfAborted();
+    const resolution = await fsHandle.resolveNamingConflict(
+        argv.nodeId,
+        action,
+        { expectedConflicts: observedConflicts }
+    );
+    const mergeResolution =
+        action.type === "merge-directory"
+            ? (resolution as MergeDirectoryResolutionResult)
+            : undefined;
+    const remainingConflicts = conflictsInvolvingNode(
+        await fsHandle.namingConflicts(),
+        argv.nodeId
+    );
+    const result = {
+        address: fsHandle.address,
+        nodeId: argv.nodeId,
+        action,
+        expectedEventIds,
+        observedConflicts: observedConflicts.map(namingConflictForJson),
+        remainingConflicts: remainingConflicts.map(namingConflictForJson),
+        ...(mergeResolution ? { resolution: mergeResolution } : {}),
+    };
+    if (argv.json) {
+        printJson(result, out);
+        return;
+    }
+    out.log(
+        out.chalk.green(
+            `Processed naming action ${action.type} for ${argv.nodeId}`
+        )
+    );
+    if (action.type === "move") {
+        out.log(`destination: ${action.to}`);
+    }
+    if (mergeResolution?.type === "directory-merged") {
+        out.log(
+            `reparented direct children: ${mergeResolution.movedNodeIds.length}`
+        );
+    }
+    out.log(
+        `remaining visible conflicts involving node: ${remainingConflicts.length}`
+    );
+    if (remainingConflicts.length > 0) {
+        out.log(
+            out.chalk.yellow(
+                "The action did not clear every visible naming conflict; inspect naming-conflicts again."
+            )
+        );
+    }
+};
+
+const runTrust = async (
+    { fsHandle }: LiveFs,
+    argv: WriterArgs,
+    out: CliOutput
+) => {
+    const { decodePublicSignKey } = await loadSharedFsRuntime();
+    const key = decodePublicSignKey(String(argv.publicKey));
+    out.signal?.throwIfAborted();
+    await fsHandle.authorizeWriter(key);
+    out.log(out.chalk.green("Writer trusted"));
+};
+
+const runRevoke = async (
+    { fsHandle }: LiveFs,
+    argv: WriterArgs,
+    out: CliOutput
+) => {
+    const { decodePublicSignKey } = await loadSharedFsRuntime();
+    const key = decodePublicSignKey(String(argv.publicKey));
+    out.signal?.throwIfAborted();
+    await fsHandle.revokeWriter(key);
+    const stillTrusted = await fsHandle.isTrustedWriter(key);
+    out.log(
+        stillTrusted
+            ? out.chalk.yellow(
+                  "Edge revoked, but the key is STILL trusted through another path — revoke the remaining grants (only each truster can revoke its own edge)"
+              )
+            : out.chalk.green("Writer revoked")
+    );
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const runGc = async (
+    { fsHandle }: LiveFs,
+    argv: {
+        keepVersions?: number;
+        retentionDays?: number;
+        graceDays?: number;
+        chunkGraceHours?: number;
+        namingGraceDays?: number;
+        settleSeconds?: number;
+        minOrphanSpanMinutes?: number;
+        scope?: string;
+        immediateSweep: boolean;
+        dryRun: boolean;
+        json: boolean;
+    },
+    out: CliOutput
+) => {
+    out.signal?.throwIfAborted();
+    const report = await fsHandle.collectGarbage({
+        keepVersions: argv.keepVersions,
+        retentionMs: argv.retentionDays
+            ? argv.retentionDays * DAY_MS
+            : undefined,
+        graceMs: argv.graceDays ? argv.graceDays * DAY_MS : undefined,
+        chunkGraceMs: argv.chunkGraceHours
+            ? argv.chunkGraceHours * 60 * 60 * 1000
+            : undefined,
+        namingGraceMs: argv.namingGraceDays
+            ? argv.namingGraceDays * DAY_MS
+            : undefined,
+        settleMs: argv.settleSeconds ? argv.settleSeconds * 1000 : undefined,
+        minOrphanSpanMs: argv.minOrphanSpanMinutes
+            ? argv.minOrphanSpanMinutes * 60 * 1000
+            : undefined,
+        scope: argv.scope,
+        chunkSweep: argv.immediateSweep ? "immediate" : "ledger",
+        dryRun: argv.dryRun,
+    });
+    if (argv.json) {
+        printJson(report, out);
+    } else {
+        const mode = report.dryRun ? " (dry run)" : "";
+        out.log(out.chalk.bold(`gc report${mode}`));
+        out.log(`retired versions:        ${report.retiredVersions}`);
+        out.log(`compacted naming events: ${report.compactedNamingEvents}`);
+        out.log(`purged nodes:            ${report.purgedNodes}`);
+        out.log(
+            `deleted chunks:          ${report.deletedChunks} (${report.reclaimedChunkBytes} bytes)`
+        );
+        out.log(
+            `reclaimed segments:      ${report.segmentBlocksDeleted} (${report.reclaimedSegmentBytes} bytes)`
+        );
+        out.log(`healed chunks:           ${report.healedChunks}`);
+        out.log(`conflicted nodes kept:   ${report.conflictedNodes}`);
+        if (
+            report.chunkCandidatesRecorded > 0 ||
+            report.purgeCandidatesRecorded > 0
+        ) {
+            out.log(
+                out.chalk.yellow(
+                    `candidates recorded: ${report.chunkCandidatesRecorded} chunk(s), ${report.purgeCandidatesRecorded} purge(s) — run gc again after the span to reclaim them.`
+                )
+            );
+        }
+        for (const warning of report.warnings) {
+            out.log(out.chalk.yellow(`warning: ${warning}`));
+        }
+    }
+    if (report.damagedNodeIds.length > 0) {
+        out.error(
+            out.chalk.red(
+                `damaged nodes (missing unrecoverable chunks): ${report.damagedNodeIds.join(", ")}`
+            )
+        );
+        out.exit(1);
+    }
+};
+
+/**
+ * The commands a running mount runs for its state directory, through its
+ * control endpoint, on its live filesystem: what each prints and its exit
+ * status are those of the command run on the stopped directory.
+ */
+const SERVED_COMMANDS = {
+    status: runStatus,
+    conflicts: runConflicts,
+    "naming-conflicts": runNamingConflicts,
+    "resolve-conflict": runResolveConflict,
+    "resolve-naming-conflict": runResolveNamingConflict,
+    trust: runTrust,
+    revoke: runRevoke,
+    gc: runGc,
+};
+
+type ServedCommand = keyof typeof SERVED_COMMANDS;
+
+/** A served command's output, printed where its client runs. */
+const controlOutput = (
+    output: MountControlOutput,
+    print: (message: MountControlPrint) => void,
+    signal: AbortSignal
+) => {
+    const out: CliOutput & { exitCode?: number } = {
+        chalk: new Chalk({ level: output.color }),
+        log: (text) => print({ type: "console", method: "log", text }),
+        warn: (text) => print({ type: "console", method: "warn", text }),
+        error: (text) => print({ type: "console", method: "error", text }),
+        stderr: {
+            ...output.stderr,
+            write: (text) => print({ type: "stderr", text }),
+        },
+        exit: (code) => {
+            out.exitCode = code;
+        },
+        signal,
+    };
+    return out;
+};
+
+/** Runs a request a mount's control endpoint received. */
+const serveMountRequest = async (
+    live: LiveFs | undefined,
+    request: Parameters<MountControlHandler>[0],
+    print: (message: MountControlPrint) => void,
+    signal: AbortSignal
+) => {
+    if (!Object.hasOwn(SERVED_COMMANDS, request.command)) {
+        throw new MountControlRefusal(
+            `peerbit-fs ${request.command} does not run through it`
+        );
+    }
+    if (!live) {
+        throw new MountControlRefusal(
+            "it is still opening the filesystem: run the command again once it has"
+        );
+    }
+    if (request.argv.address !== live.fsHandle.address) {
+        throw new MountControlRefusal(
+            `it serves ${live.fsHandle.address}, not ${String(request.argv.address)}`
+        );
+    }
+    const out = controlOutput(request.output, print, signal);
+    await SERVED_COMMANDS[request.command as ServedCommand](
+        live,
+        request.argv as never,
+        out
+    );
+    return out.exitCode;
+};
+
+/** Prints what a command printed in the mount that ran it, as it did. */
+const printFromMount = (message: MountControlPrint) => {
+    if (message.type === "stderr") process.stderr.write(message.text);
+    else consoleOutput[message.method](message.text);
+};
+
+/**
+ * Runs a served command for its state directory: through the control
+ * endpoint of a mount running for it, on that mount's live filesystem, or,
+ * with no mount running, on a Peerbit of its own, as always. A mount whose
+ * endpoint cannot be reached is named instead of the directory's lock.
+ */
+const runServedCommand = async (
+    command: ServedCommand,
+    argv: CliNetworkArgs & {
+        directory?: string;
+        machine?: string;
+        replicate: boolean;
+        address: string;
+        /** The command's own options. */
+        [option: string]: unknown;
+    }
+) => {
+    // Checked either way, before anything opens.
+    networkTargets(argv);
+    const directory = resolveDirectory(argv.directory);
+    const mount =
+        directory === undefined ? undefined : readMountControl(directory);
+    let unreachable: string | undefined;
+    if (mount && processAlive(mount.pid)) {
+        const columns = process.stderr.columns;
+        const outcome = await callMountControl(
+            mount,
+            {
+                cli: await readCliPackageVersion(),
+                command,
+                argv: JSON.parse(JSON.stringify(argv)),
+                output: {
+                    color: chalk.level,
+                    stderr: {
+                        isTTY: process.stderr.isTTY === true,
+                        ...(typeof columns === "number" && columns > 0
+                            ? { columns }
+                            : {}),
+                    },
+                },
+            },
+            printFromMount
+        );
+        if (outcome.reached) {
+            if (outcome.exitCode !== null) process.exitCode = outcome.exitCode;
+            return;
+        }
+        unreachable = outcome.reason;
+    }
+    const peerbit = await createPeerbitForCli(directory, command, unreachable);
+    try {
+        await connectToNetwork(peerbit, argv, {
+            publicNetwork: argv.replicate !== false,
+        });
+        const fsHandle = await openCliFs(peerbit, {
+            address: argv.address,
+            machineLabel: argv.machine,
+            replicate: argv.replicate,
+        });
+        await SERVED_COMMANDS[command](
+            { fsHandle, peerbit },
+            argv as never,
+            consoleOutput
+        );
+    } finally {
+        await stopPeerbitForCli(peerbit);
+    }
+};
+
+/**
+ * For a handler that opens the state directory: a mount running for it is
+ * named on one line, with exit status 1, not with the help and a stack.
+ */
+const namingRunningMount =
+    <A>(handler: (argv: A) => Promise<void>) =>
+    async (argv: A) => {
+        try {
+            await handler(argv);
+        } catch (error) {
+            if (!(error instanceof MountRunningError)) throw error;
+            console.error(chalk.red(error.message));
+            process.exitCode = 1;
+        }
+    };
 
 /** What the refusal of a boolean flag given a value adds, by option. */
 const VALUED_BOOLEAN_HINTS = new Map([
@@ -1481,14 +2275,14 @@ export const createCliParser = (args: string[]) => {
                     description:
                         "Create with trusted-writer access control rooted at this peer identity. Disable with --no-auth.",
                 }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 if (argv.replicate === false) {
                     throw new Error(
                         "create requires a full replica; --no-replicate is not allowed"
                     );
                 }
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
+                const peerbit = await createPeerbitForCli(directory, "create");
                 try {
                     const fsHandle = await openCliFs(peerbit, {
                         machineLabel: argv.machine,
@@ -1522,16 +2316,16 @@ export const createCliParser = (args: string[]) => {
                 } finally {
                     await stopPeerbitForCli(peerbit);
                 }
-            }
+            })
         )
         .command(
             "whoami",
             "print the local Peerbit writer public key",
             (command) => command,
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 const { encodePublicSignKey } = await loadSharedFsRuntime();
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
+                const peerbit = await createPeerbitForCli(directory, "whoami");
                 try {
                     console.log(
                         encodePublicSignKey(peerbit.identity.publicKey)
@@ -1539,7 +2333,7 @@ export const createCliParser = (args: string[]) => {
                 } finally {
                     await stopPeerbitForCli(peerbit);
                 }
-            }
+            })
         )
         .command(
             "trust <address> <public-key>",
@@ -1556,27 +2350,7 @@ export const createCliParser = (args: string[]) => {
                         description:
                             "Base64 public key printed by peerbit-fs whoami.",
                     }),
-            async (argv) => {
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv, {
-                        publicNetwork: argv.replicate !== false,
-                    });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: argv.replicate,
-                    });
-                    const { decodePublicSignKey } = await loadSharedFsRuntime();
-                    await fsHandle.authorizeWriter(
-                        decodePublicSignKey(String(argv.publicKey))
-                    );
-                    console.log(chalk.green("Writer trusted"));
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+            namingRunningMount((argv) => runServedCommand("trust", argv))
         )
         .command(
             "revoke <address> <public-key>",
@@ -1593,33 +2367,7 @@ export const createCliParser = (args: string[]) => {
                         description:
                             "Base64 public key printed by peerbit-fs whoami.",
                     }),
-            async (argv) => {
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv, {
-                        publicNetwork: argv.replicate !== false,
-                    });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: argv.replicate,
-                    });
-                    const { decodePublicSignKey } = await loadSharedFsRuntime();
-                    const key = decodePublicSignKey(String(argv.publicKey));
-                    await fsHandle.revokeWriter(key);
-                    const stillTrusted = await fsHandle.isTrustedWriter(key);
-                    console.log(
-                        stillTrusted
-                            ? chalk.yellow(
-                                  "Edge revoked, but the key is STILL trusted through another path — revoke the remaining grants (only each truster can revoke its own edge)"
-                              )
-                            : chalk.green("Writer revoked")
-                    );
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+            namingRunningMount((argv) => runServedCommand("revoke", argv))
         )
         .command(
             "install-adapter",
@@ -1742,7 +2490,7 @@ export const createCliParser = (args: string[]) => {
                         description:
                             "Give up --persist-on-exit after this long (exit 75).",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 if (argv.replicate === false) {
                     throw new Error(
                         "mount requires a full replica; --no-replicate is not allowed for a writable mount"
@@ -1803,7 +2551,10 @@ export const createCliParser = (args: string[]) => {
                     openSharedFsMountProfileFile,
                 } = await loadSharedFsRuntime();
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
+                const peerbit = await createPeerbitForCli(directory, "mount");
+                let control: MountControl | undefined;
+                // What the control endpoint runs commands on, once open.
+                let live: LiveFs | undefined;
                 let ipc:
                     | Awaited<ReturnType<typeof createSharedFsIpcServer>>
                     | undefined;
@@ -1818,6 +2569,16 @@ export const createCliParser = (args: string[]) => {
                 // Settles, reported, if the adapter exits on its own.
                 let adapterExited: Promise<void> | undefined;
                 try {
+                    // Now that this process holds the state directory, so
+                    // that a command for it names this mount from here on.
+                    if (directory !== undefined) {
+                        control = await startMountControl({
+                            directory,
+                            cliVersion: await readCliPackageVersion(),
+                            handle: (request, print, signal) =>
+                                serveMountRequest(live, request, print, signal),
+                        });
+                    }
                     const unreachable = await connectMountToNetwork(
                         peerbit,
                         argv
@@ -1833,6 +2594,7 @@ export const createCliParser = (args: string[]) => {
                     }).catch((error) => {
                         throw mountOpenError(argv.address, unreachable, error);
                     });
+                    live = { fsHandle, peerbit };
                     // A fresh address-open can serve bootstrap-overlay reads
                     // before its namespace is safe to mutate. Do not expose a
                     // writable OS mount until the full-replica readiness fence
@@ -1891,6 +2653,15 @@ export const createCliParser = (args: string[]) => {
                         )
                     );
                     console.log(`IPC endpoint: ${ipc.endpoint}`);
+                    if (control?.endpoint !== undefined) {
+                        console.log(`Control endpoint: ${control.endpoint}`);
+                    } else if (control) {
+                        console.warn(
+                            chalk.yellow(
+                                `No control endpoint (${control.failure}): peerbit-fs commands for ${directory} do not reach this mount, and say that it runs.`
+                            )
+                        );
+                    }
                     const gcSchedule = fsHandle.gcStatus();
                     console.log(
                         gcSchedule.scheduled
@@ -1900,6 +2671,7 @@ export const createCliParser = (args: string[]) => {
                 } catch (error) {
                     await stopMountSession(
                         {
+                            control,
                             mounted,
                             ipc,
                             backend,
@@ -1917,6 +2689,7 @@ export const createCliParser = (args: string[]) => {
                     waitForTermination(
                         (shutdown) =>
                             stopMountSession({
+                                control,
                                 mounted,
                                 ipc,
                                 backend,
@@ -1930,7 +2703,7 @@ export const createCliParser = (args: string[]) => {
                         adapterExited
                     )
                 );
-            }
+            })
         )
         .command(
             "status [address]",
@@ -1951,7 +2724,7 @@ export const createCliParser = (args: string[]) => {
                         description:
                             "Run whole-store content and naming conflict scans and include their results.",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 const nativeMount = await readNativeStatus();
                 if (!argv.address) {
                     if (argv.json) {
@@ -1964,168 +2737,12 @@ export const createCliParser = (args: string[]) => {
                 if (!argv.json) {
                     printNativeRequirements(nativeMount);
                 }
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv, {
-                        publicNetwork: argv.replicate !== false,
-                    });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: argv.replicate,
-                    });
-                    const bootstrapBefore = fsHandle.bootstrapStatus();
-                    const rootEntries = await fsHandle.list("/");
-                    // Whole-store conflict scans are intentionally opt-in:
-                    // they scale with retained metadata and can dominate a
-                    // routine readiness/status check on a large workspace.
-                    const conflictStatus = argv.includeConflicts
-                        ? {
-                              content: await fsHandle.conflicts(undefined, {
-                                  allowPartial: true,
-                              }),
-                              naming: await fsHandle.namingConflicts(
-                                  undefined,
-                                  {
-                                      allowPartial: true,
-                                  }
-                              ),
-                          }
-                        : undefined;
-                    const bootstrapAfter = fsHandle.bootstrapStatus();
-                    const bootstrapStateChangedDuringScan =
-                        bootstrapBefore.phase !== bootstrapAfter.phase ||
-                        bootstrapBefore.pendingDocs !==
-                            bootstrapAfter.pendingDocs ||
-                        bootstrapBefore.snapshotCoverageVerified !==
-                            bootstrapAfter.snapshotCoverageVerified ||
-                        bootstrapBefore.writeReady !==
-                            bootstrapAfter.writeReady;
-                    const conflictViewPartial = conflictScanIsPartial(
-                        argv.replicate !== false,
-                        bootstrapBefore,
-                        bootstrapAfter
-                    );
-                    const gc = fsHandle.gcStatus();
-                    if (argv.json) {
-                        printJson({
-                            nativeMount,
-                            filesystem: {
-                                address: fsHandle.address,
-                                bootstrap: {
-                                    phase: bootstrapAfter.phase,
-                                    pendingDocs: bootstrapAfter.pendingDocs,
-                                    snapshotCoverageVerified:
-                                        bootstrapAfter.snapshotCoverageVerified,
-                                    writeReady: bootstrapAfter.writeReady,
-                                    writeReadinessSource:
-                                        bootstrapAfter.writeReadinessSource ??
-                                        null,
-                                    // Which peers a join waits for and why
-                                    // (plain data), or null without a join.
-                                    readiness: bootstrapAfter.readiness ?? null,
-                                    // A warm replica's freshness check, or
-                                    // null without one. This short run
-                                    // checks only if a peer asks it.
-                                    freshness: bootstrapAfter.freshness ?? null,
-                                },
-                                localPublicKey: fsHandle.localPublicKey,
-                                accessControlled: fsHandle.accessControlled,
-                                rootKey: fsHandle.rootKey ?? null,
-                                rootEntries: rootEntries.length,
-                                conflicts: conflictStatus
-                                    ? {
-                                          partial: conflictViewPartial,
-                                          scope: "local-replica",
-                                          bootstrapPhaseBefore:
-                                              bootstrapBefore.phase,
-                                          bootstrapPhaseAfter:
-                                              bootstrapAfter.phase,
-                                          bootstrapStateChangedDuringScan,
-                                          contentCount:
-                                              conflictStatus.content.length,
-                                          namingCount:
-                                              conflictStatus.naming.length,
-                                          content: conflictStatus.content.map(
-                                              contentConflictForJson
-                                          ),
-                                          naming: conflictStatus.naming.map(
-                                              namingConflictForJson
-                                          ),
-                                      }
-                                    : null,
-                                gc: {
-                                    scheduled: gc.scheduled,
-                                    nextRunAtMs: gc.nextRunAtMs ?? null,
-                                    consecutiveFailures: gc.consecutiveFailures,
-                                },
-                            },
-                        });
-                        return;
-                    }
-                    console.log(`address: ${fsHandle.address}`);
-                    if (bootstrapAfter.phase !== "off") {
-                        console.log(
-                            `bootstrap: ${bootstrapAfter.phase} (${bootstrapAfter.pendingDocs} documents pending)`
-                        );
-                    }
-                    if (
-                        !bootstrapAfter.writeReady &&
-                        bootstrapAfter.readiness
-                    ) {
-                        // status does not wait: this is the join's reason
-                        // right after open.
-                        const { describeReadiness } =
-                            await loadSharedFsRuntime();
-                        console.log(
-                            `write readiness: pending (${describeReadiness(bootstrapAfter.readiness)})`
-                        );
-                    } else {
-                        console.log(
-                            `write readiness: ${bootstrapAfter.writeReady ? "ready" : "pending"}${bootstrapAfter.writeReadinessSource ? ` (${bootstrapAfter.writeReadinessSource})` : ""}`
-                        );
-                    }
-                    const freshness = freshnessLine(bootstrapAfter);
-                    if (freshness) console.log(freshness);
-                    console.log(`local public key: ${fsHandle.localPublicKey}`);
-                    console.log(
-                        `access controlled: ${
-                            fsHandle.accessControlled ? "yes" : "no"
-                        }`
-                    );
-                    if (fsHandle.rootKey) {
-                        console.log(`root key: ${fsHandle.rootKey}`);
-                    }
-                    console.log(`root entries: ${rootEntries.length}`);
-                    if (conflictStatus) {
-                        const partial = conflictViewPartial
-                            ? " (partial bootstrap view)"
-                            : "";
-                        console.log(
-                            `conflicts: ${conflictStatus.content.length}${partial}`
-                        );
-                        console.log(
-                            `naming conflicts: ${conflictStatus.naming.length}${partial}`
-                        );
-                    } else {
-                        console.log(
-                            "conflicts: not scanned (use --include-conflicts)"
-                        );
-                        console.log(
-                            "naming conflicts: not scanned (use --include-conflicts)"
-                        );
-                    }
-                    const nextIn = gc.nextRunAtMs
-                        ? ` (next run in ${Math.max(0, Math.round((gc.nextRunAtMs - Date.now()) / 1000))}s)`
-                        : "";
-                    console.log(
-                        `gc schedule: ${gc.scheduled ? `on${nextIn}` : "off"}`
-                    );
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+                await runServedCommand("status", {
+                    ...argv,
+                    address: argv.address,
+                    nativeMount,
+                });
+            })
         )
         .command(
             "conflicts <address>",
@@ -2156,105 +2773,7 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: `With --fail-if-any, exit 0 instead of ${CONFLICTS_UNVERIFIED_EXIT_CODE} when no conflict is found in a view not verified complete.`,
                     }),
-            async (argv) => {
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv, {
-                        publicNetwork: argv.replicate !== false,
-                    });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: argv.replicate,
-                    });
-                    // Conflict listings need the converged view.
-                    const convergence =
-                        await fsHandle.awaitBootstrapConverged();
-                    const bootstrap = fsHandle.bootstrapStatus();
-                    const snapshotCoverageVerified =
-                        argv.replicate !== false &&
-                        convergence.verified &&
-                        bootstrap.phase === "converged" &&
-                        bootstrap.snapshotCoverageVerified;
-                    const conflicts = await fsHandle.conflicts(argv.path);
-                    // The gate counts every kind; the listing stays content.
-                    const namingConflicts = argv.failIfAny
-                        ? await fsHandle.namingConflicts(argv.path)
-                        : [];
-                    if (
-                        argv.failIfAny &&
-                        conflicts.length + namingConflicts.length > 0
-                    ) {
-                        process.exitCode = CONFLICTS_FOUND_EXIT_CODE;
-                    } else if (
-                        argv.failIfAny &&
-                        !snapshotCoverageVerified &&
-                        !argv.allowUnverified
-                    ) {
-                        // No conflict here proves none only in a verified
-                        // view: a gate must not pass on a partial one.
-                        process.exitCode = CONFLICTS_UNVERIFIED_EXIT_CODE;
-                    }
-                    if (argv.json) {
-                        printJson({
-                            address: fsHandle.address,
-                            path: argv.path
-                                ? await normalizeCliFsPath(argv.path)
-                                : null,
-                            view: {
-                                fullReplica: argv.replicate !== false,
-                                bootstrapPhase: bootstrap.phase,
-                                snapshotCoverageVerified,
-                            },
-                            conflicts: conflicts.map(contentConflictForJson),
-                            ...(argv.failIfAny
-                                ? {
-                                      namingConflicts: namingConflicts.map(
-                                          namingConflictForJson
-                                      ),
-                                  }
-                                : {}),
-                        });
-                        return;
-                    }
-                    if (!snapshotCoverageVerified) {
-                        console.warn(
-                            chalk.yellow(
-                                "Conflict results reflect a settled local view without a verified full-replica bootstrap; do not treat absence as proof of no remote conflict."
-                            )
-                        );
-                    }
-                    if (conflicts.length + namingConflicts.length === 0) {
-                        console.log("No conflicts");
-                        return;
-                    }
-                    for (const conflict of conflicts) {
-                        console.log(chalk.bold(conflict.path));
-                        console.log(`  node: ${conflict.nodeId}`);
-                        for (const [
-                            index,
-                            version,
-                        ] of conflict.versions.entries()) {
-                            console.log(
-                                `  ${version.id} ${version.size} bytes ${version.machineLabel} ${version.authorKey}${index === 0 ? " (visible)" : ""}`
-                            );
-                        }
-                    }
-                    if (namingConflicts.length > 0) {
-                        console.log(
-                            chalk.bold(
-                                `naming conflicts (details: peerbit-fs naming-conflicts ${fsHandle.address}):`
-                            )
-                        );
-                        for (const conflict of namingConflicts) {
-                            console.log(`  ${conflict.type} ${conflict.path}`);
-                        }
-                    }
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+            namingRunningMount((argv) => runServedCommand("conflicts", argv))
         )
         .command(
             "naming-conflicts <address>",
@@ -2274,76 +2793,9 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv, {
-                        publicNetwork: argv.replicate !== false,
-                    });
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: argv.replicate,
-                    });
-                    const convergence =
-                        await fsHandle.awaitBootstrapConverged();
-                    const bootstrap = fsHandle.bootstrapStatus();
-                    const snapshotCoverageVerified =
-                        argv.replicate !== false &&
-                        convergence.verified &&
-                        bootstrap.phase === "converged" &&
-                        bootstrap.snapshotCoverageVerified;
-                    const conflicts = await fsHandle.namingConflicts(argv.path);
-                    if (argv.json) {
-                        printJson({
-                            address: fsHandle.address,
-                            path: argv.path
-                                ? await normalizeCliFsPath(argv.path)
-                                : null,
-                            view: {
-                                fullReplica: argv.replicate !== false,
-                                bootstrapPhase: bootstrap.phase,
-                                snapshotCoverageVerified,
-                            },
-                            conflicts: conflicts.map(namingConflictForJson),
-                        });
-                        return;
-                    }
-                    if (!snapshotCoverageVerified) {
-                        console.warn(
-                            chalk.yellow(
-                                "Naming conflict results reflect a settled local view without a verified full-replica bootstrap; do not treat absence as proof of no remote conflict."
-                            )
-                        );
-                    }
-                    if (conflicts.length === 0) {
-                        console.log("No naming conflicts");
-                        return;
-                    }
-                    for (const conflict of conflicts) {
-                        console.log(
-                            chalk.bold(`${conflict.type} ${conflict.path}`)
-                        );
-                        console.log(`  node: ${conflict.nodeId}`);
-                        console.log(
-                            `  events: ${[...conflict.eventIds].sort().join(", ")}`
-                        );
-                        if (conflict.shadowedNodeIds?.length) {
-                            console.log(
-                                `  shadowed nodes: ${[...conflict.shadowedNodeIds].sort().join(", ")}`
-                            );
-                        }
-                        if (conflict.recoverableVersionIds?.length) {
-                            console.log(
-                                `  recoverable versions: ${[...conflict.recoverableVersionIds].sort().join(", ")}`
-                            );
-                        }
-                    }
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+            namingRunningMount((argv) =>
+                runServedCommand("naming-conflicts", argv)
+            )
         )
         .command(
             "resolve-conflict <address> <path> <version-id>",
@@ -2374,88 +2826,11 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 assertResolutionReplica("resolve-conflict", argv.replicate);
                 assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv);
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: true,
-                    });
-                    await awaitConflictResolutionReady(fsHandle, peerbit, {
-                        timeoutMs: argv.writeReadyTimeoutMs,
-                        subject:
-                            "resolve-conflict did not establish a safe write view",
-                        offersAssumeComplete: true,
-                        assumeComplete: argv.assumeComplete,
-                    });
-                    const normalizedPath = await normalizeCliFsPath(argv.path);
-                    const visible = await fsHandle.conflicts(normalizedPath);
-                    // conflicts() lists one version per content; every head
-                    // is selectable and becomes a parent of the resolution.
-                    const observedHeadVersionIds = [
-                        ...((await fsHandle.stat(normalizedPath))
-                            ?.headVersionIds ?? []),
-                    ].sort();
-                    if (
-                        !visible.some(
-                            (conflict) => conflict.path === normalizedPath
-                        ) ||
-                        !observedHeadVersionIds.includes(argv.versionId)
-                    ) {
-                        throw new Error(
-                            `Version ${argv.versionId} is not a current conflict head for ${normalizedPath}; rerun peerbit-fs conflicts before retrying`
-                        );
-                    }
-                    const resolution = await fsHandle.resolveConflict(
-                        normalizedPath,
-                        argv.versionId
-                    );
-                    const supersededHeadVersionIds = [
-                        ...resolution.parentVersionIds,
-                    ].sort();
-                    const headSetChangedDuringResolution =
-                        observedHeadVersionIds.join("\0") !==
-                        supersededHeadVersionIds.join("\0");
-                    const result = {
-                        address: fsHandle.address,
-                        path: resolution.path,
-                        nodeId: resolution.nodeId,
-                        selectedVersionId: argv.versionId,
-                        observedHeadVersionIds,
-                        supersededHeadVersionIds,
-                        headSetChangedDuringResolution,
-                        resolution: versionForJson(resolution),
-                    };
-                    if (argv.json) {
-                        printJson(result);
-                        return;
-                    }
-                    console.log(
-                        chalk.green(
-                            `Published content resolution for ${resolution.path}`
-                        )
-                    );
-                    console.log(`selected version: ${argv.versionId}`);
-                    console.log(`resolution version: ${resolution.id}`);
-                    console.log(
-                        `superseded heads: ${supersededHeadVersionIds.join(", ")}`
-                    );
-                    if (headSetChangedDuringResolution) {
-                        console.log(
-                            chalk.yellow(
-                                "The visible head set changed during resolution; inspect conflicts again."
-                            )
-                        );
-                    }
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+                await runServedCommand("resolve-conflict", argv);
+            })
         )
         .command(
             "resolve-naming-conflict <address> <node-id> <action>",
@@ -2498,106 +2873,16 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
-                const action = await namingActionFromCli(argv.action, argv.to);
+            namingRunningMount(async (argv) => {
+                // Checked before anything opens; the command runs it again.
+                await namingActionFromCli(argv.action, argv.to);
                 assertResolutionReplica(
                     "resolve-naming-conflict",
                     argv.replicate
                 );
                 assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv);
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: true,
-                    });
-                    await awaitConflictResolutionReady(fsHandle, peerbit, {
-                        timeoutMs: argv.writeReadyTimeoutMs,
-                        subject:
-                            "resolve-naming-conflict did not establish a safe write view",
-                        offersAssumeComplete: true,
-                        assumeComplete: argv.assumeComplete,
-                    });
-                    const observedConflicts = conflictsInvolvingNode(
-                        await fsHandle.namingConflicts(),
-                        argv.nodeId
-                    );
-                    if (observedConflicts.length === 0) {
-                        throw new Error(
-                            `Node ${argv.nodeId} is not part of a currently visible naming conflict; rerun peerbit-fs naming-conflicts before retrying`
-                        );
-                    }
-                    const expectedEventIds = [
-                        ...new Set(
-                            observedConflicts.flatMap(
-                                (conflict) => conflict.eventIds
-                            )
-                        ),
-                    ].sort();
-                    const resolution = await fsHandle.resolveNamingConflict(
-                        argv.nodeId,
-                        action,
-                        {
-                            expectedConflicts: observedConflicts,
-                        }
-                    );
-                    const mergeResolution =
-                        action.type === "merge-directory"
-                            ? (resolution as MergeDirectoryResolutionResult)
-                            : undefined;
-                    const remainingConflicts = conflictsInvolvingNode(
-                        await fsHandle.namingConflicts(),
-                        argv.nodeId
-                    );
-                    const result = {
-                        address: fsHandle.address,
-                        nodeId: argv.nodeId,
-                        action,
-                        expectedEventIds,
-                        observedConflicts: observedConflicts.map(
-                            namingConflictForJson
-                        ),
-                        remainingConflicts: remainingConflicts.map(
-                            namingConflictForJson
-                        ),
-                        ...(mergeResolution
-                            ? { resolution: mergeResolution }
-                            : {}),
-                    };
-                    if (argv.json) {
-                        printJson(result);
-                        return;
-                    }
-                    console.log(
-                        chalk.green(
-                            `Processed naming action ${action.type} for ${argv.nodeId}`
-                        )
-                    );
-                    if (action.type === "move") {
-                        console.log(`destination: ${action.to}`);
-                    }
-                    if (mergeResolution?.type === "directory-merged") {
-                        console.log(
-                            `reparented direct children: ${mergeResolution.movedNodeIds.length}`
-                        );
-                    }
-                    console.log(
-                        `remaining visible conflicts involving node: ${remainingConflicts.length}`
-                    );
-                    if (remainingConflicts.length > 0) {
-                        console.log(
-                            chalk.yellow(
-                                "The action did not clear every visible naming conflict; inspect naming-conflicts again."
-                            )
-                        );
-                    }
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+                await runServedCommand("resolve-naming-conflict", argv);
+            })
         )
         .command(
             "benchmark [address]",
@@ -2643,9 +2928,12 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
+                const peerbit = await createPeerbitForCli(
+                    directory,
+                    "benchmark"
+                );
                 try {
                     if (argv.address) {
                         await connectToNetwork(peerbit, argv, {
@@ -2675,7 +2963,7 @@ export const createCliParser = (args: string[]) => {
                 } finally {
                     await stopPeerbitForCli(peerbit);
                 }
-            }
+            })
         )
         .command(
             "prepare-disposal <address>",
@@ -2702,7 +2990,7 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 if (argv.replicate === false) {
                     throw new Error(
                         "prepare-disposal requires a full replica; --no-replicate is not allowed."
@@ -2710,7 +2998,10 @@ export const createCliParser = (args: string[]) => {
                 }
                 const result = await (async () => {
                     const directory = resolveDirectory(argv.directory);
-                    const peerbit = await createPeerbitForCli(directory);
+                    const peerbit = await createPeerbitForCli(
+                        directory,
+                        "prepare-disposal"
+                    );
                     let preparation:
                         | { ok: true; value: PrepareForDisposalResult }
                         | { ok: false; reason: unknown };
@@ -2766,7 +3057,7 @@ export const createCliParser = (args: string[]) => {
                 } else {
                     printPrepareForDisposalResult(result);
                 }
-            }
+            })
         )
         .command(
             "gc <address>",
@@ -2833,7 +3124,7 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 if (argv.replicate === false) {
                     console.error(
                         chalk.red(
@@ -2843,102 +3134,8 @@ export const createCliParser = (args: string[]) => {
                     process.exitCode = 1;
                     return;
                 }
-                const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
-                try {
-                    await connectToNetwork(peerbit, argv);
-                    const fsHandle = await openCliFs(peerbit, {
-                        address: argv.address,
-                        machineLabel: argv.machine,
-                        replicate: true,
-                    });
-                    const report = await fsHandle.collectGarbage({
-                        keepVersions: argv.keepVersions,
-                        retentionMs: argv.retentionDays
-                            ? argv.retentionDays * 24 * 60 * 60 * 1000
-                            : undefined,
-                        graceMs: argv.graceDays
-                            ? argv.graceDays * 24 * 60 * 60 * 1000
-                            : undefined,
-                        chunkGraceMs: argv.chunkGraceHours
-                            ? argv.chunkGraceHours * 60 * 60 * 1000
-                            : undefined,
-                        namingGraceMs: argv.namingGraceDays
-                            ? argv.namingGraceDays * 24 * 60 * 60 * 1000
-                            : undefined,
-                        settleMs: argv.settleSeconds
-                            ? argv.settleSeconds * 1000
-                            : undefined,
-                        minOrphanSpanMs: argv.minOrphanSpanMinutes
-                            ? argv.minOrphanSpanMinutes * 60 * 1000
-                            : undefined,
-                        scope: argv.scope,
-                        chunkSweep: argv.immediateSweep
-                            ? "immediate"
-                            : "ledger",
-                        dryRun: argv.dryRun,
-                    });
-                    if (argv.json) {
-                        console.log(
-                            JSON.stringify(
-                                report,
-                                (key, value) =>
-                                    typeof value === "bigint"
-                                        ? value.toString()
-                                        : value,
-                                2
-                            )
-                        );
-                    } else {
-                        const mode = report.dryRun ? " (dry run)" : "";
-                        console.log(chalk.bold(`gc report${mode}`));
-                        console.log(
-                            `retired versions:        ${report.retiredVersions}`
-                        );
-                        console.log(
-                            `compacted naming events: ${report.compactedNamingEvents}`
-                        );
-                        console.log(
-                            `purged nodes:            ${report.purgedNodes}`
-                        );
-                        console.log(
-                            `deleted chunks:          ${report.deletedChunks} (${report.reclaimedChunkBytes} bytes)`
-                        );
-                        console.log(
-                            `reclaimed segments:      ${report.segmentBlocksDeleted} (${report.reclaimedSegmentBytes} bytes)`
-                        );
-                        console.log(
-                            `healed chunks:           ${report.healedChunks}`
-                        );
-                        console.log(
-                            `conflicted nodes kept:   ${report.conflictedNodes}`
-                        );
-                        if (
-                            report.chunkCandidatesRecorded > 0 ||
-                            report.purgeCandidatesRecorded > 0
-                        ) {
-                            console.log(
-                                chalk.yellow(
-                                    `candidates recorded: ${report.chunkCandidatesRecorded} chunk(s), ${report.purgeCandidatesRecorded} purge(s) — run gc again after the span to reclaim them.`
-                                )
-                            );
-                        }
-                        for (const warning of report.warnings) {
-                            console.log(chalk.yellow(`warning: ${warning}`));
-                        }
-                    }
-                    if (report.damagedNodeIds.length > 0) {
-                        console.error(
-                            chalk.red(
-                                `damaged nodes (missing unrecoverable chunks): ${report.damagedNodeIds.join(", ")}`
-                            )
-                        );
-                        process.exitCode = 1;
-                    }
-                } finally {
-                    await stopPeerbitForCli(peerbit);
-                }
-            }
+                await runServedCommand("gc", argv);
+            })
         )
         .command(
             "snapshot <address>",
@@ -2960,7 +3157,7 @@ export const createCliParser = (args: string[]) => {
                         default: false,
                         description: "Print machine-readable JSON.",
                     }),
-            async (argv) => {
+            namingRunningMount(async (argv) => {
                 if (argv.replicate === false) {
                     console.error(
                         chalk.red(
@@ -2972,7 +3169,10 @@ export const createCliParser = (args: string[]) => {
                 }
                 assertWriteReadyTimeout(argv.writeReadyTimeoutMs);
                 const directory = resolveDirectory(argv.directory);
-                const peerbit = await createPeerbitForCli(directory);
+                const peerbit = await createPeerbitForCli(
+                    directory,
+                    "snapshot"
+                );
                 try {
                     await connectToNetwork(peerbit, argv);
                     const fsHandle = await openCliFs(peerbit, {
@@ -3029,7 +3229,7 @@ export const createCliParser = (args: string[]) => {
                 } finally {
                     await stopPeerbitForCli(peerbit);
                 }
-            }
+            })
         )
         .command(
             "unmount <mountpoint>",
