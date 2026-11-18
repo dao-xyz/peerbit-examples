@@ -249,6 +249,28 @@ test("returns at once when every peer is already present", async (t) => {
     }
 });
 
+test("lists only this run's jobs, of its latest attempt", async (t) => {
+    // A newer push cancels a pull request's earlier run, whose jobs carry
+    // the same names: the listing must not reach them.
+    const { code, calls } = await rendezvous(
+        t,
+        [
+            [
+                plan(),
+                seed({ ready: true }),
+                joiner("macos", { ready: true }),
+                joiner("windows", { ready: true }),
+            ],
+        ],
+        [],
+        { GITHUB_RUN_ID: "44300000001", GITHUB_RUN_ATTEMPT: "3" }
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(calls, [
+        "api repos/dao-xyz/peerbit-examples/actions/runs/44300000001/jobs?per_page=100",
+    ]);
+});
+
 test("waits for a peer that arrives late, then returns", async (t) => {
     const waiting = [
         plan(),

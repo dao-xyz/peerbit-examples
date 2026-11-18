@@ -55,6 +55,15 @@ permissions:
     actions: read
     contents: read
 
+# A new push to a pull request cancels the run it supersedes, so that run
+# stops waiting for its peers and frees their runners. Manual runs on one ref
+# queue instead: GitHub keeps one waiting, and a newer one replaces it. A run
+# reads only its own jobs and artifacts, so a cancelled run's peers never
+# count in another run's rendezvous.
+concurrency:
+    group: shared-fs-cross-os-interop-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
     FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     INTEROP_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.timeout_minutes || '10' }}
