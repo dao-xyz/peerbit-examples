@@ -38,6 +38,12 @@ import {
     sharedFsMountProfileErrorCode,
     type SharedFsMountProfileSink,
 } from "./mount-profile.js";
+import {
+    assertValidOpenFlags,
+    bindMountLocalOverlay,
+    guardSharedMutations,
+    type SharedFsMountLocalOverlay,
+} from "./mount-local-overlay.js";
 
 /** Why a mount commit fence ran; reported as `mount.localCommit` trigger. */
 type LocalCommitTrigger = "flush" | "fsync" | "release" | "truncate";
@@ -182,12 +188,13 @@ export type SharedFsMountBackendTarget = {
         versionId: string
     ): Promise<SharedFsMountReadSnapshot | undefined>;
     /**
-     * Optional artifact-ignore probe (provided by ignore-aware handles).
-     * When present, write-intent opens on ignored paths fail EARLY at
-     * open() instead of surfacing a late error at flush/release that
-     * applications routinely discard.
+     * Optional artifact-ignore probe (provided by ignore-aware handles),
+     * with the shallowest ignored prefix as `boundary`. When present,
+     * write-intent opens on ignored paths fail EARLY at open() instead of
+     * surfacing a late error at flush/release that applications routinely
+     * discard; with a `localOverlay`, ignored paths are served locally.
      */
-    ignoreCheck?(path: string): { ignored: boolean };
+    ignoreCheck?(path: string): { ignored: boolean; boundary?: string };
     /**
      * Single-path lookup for getattr, open and namespace guards. For files it
      * must include `versionId`, `contentHash`, `size` and `headVersionIds`,
@@ -232,6 +239,15 @@ export type SharedFsMountBackendOptions = {
      * 262,144.
      */
     servedLimit?: number;
+    /**
+     * Serve every path at or below a sealed name (such as `node_modules`)
+     * or, with `ignoreCheck`, an ignored boundary from this machine-local
+     * directory (see openMountLocalOverlay), never from the target: a shared
+     * entry at such a path is hidden, a rename between the two sides fails
+     * with EXDEV, and a shared directory holding local entries cannot be
+     * removed or replaced (ENOTEMPTY).
+     */
+    localOverlay?: SharedFsMountLocalOverlay;
 };
 
 export type SharedFsOpenFlags =
@@ -287,7 +303,10 @@ export type SharedFsMountBackend = {
         path: string,
         options?: SharedFsReaddirOptions
     ): Promise<SharedFsDirent[]>;
-    /** `createMode` is the O_CREAT mode; only its exec bit is kept. */
+    /**
+     * `createMode` is the O_CREAT mode; only its exec bit is kept, except
+     * on a local overlay path, where the host applies it (with its umask).
+     */
     open(
         path: string,
         flags?: SharedFsOpenFlags,
@@ -313,7 +332,9 @@ export type SharedFsMountBackend = {
     unlink(path: string): Promise<void>;
     /**
      * chmod (only the exec bit is kept) and/or utimens of a regular file;
-     * a no-op for directories, the root and symlinks.
+     * a no-op for directories, the root and symlinks. On a local overlay
+     * path, chmod keeps every permission bit of a file or directory and
+     * utimens sets the time of any entry, a symlink's own included.
      */
     setattr(
         path: string,
@@ -884,6 +905,12 @@ const kernelPath = (path: string, creates = false) => {
 const alreadyExists = (path: string) =>
     new SharedFsBackendError("EEXIST", `Path already exists: ${path}`);
 
+const directoryHoldsLocalEntries = (path: string) =>
+    new SharedFsBackendError(
+        "ENOTEMPTY",
+        `Directory holds entries kept local by this mount: ${path}`
+    );
+
 const badHandle = (handle: number) =>
     new SharedFsBackendError("EBADF", `Unknown file handle: ${handle}`);
 
@@ -1116,7 +1143,7 @@ const rebaseMeta = (
 };
 
 export const createSharedFsMountBackend = (
-    target: SharedFsMountBackendTarget,
+    givenTarget: SharedFsMountBackendTarget,
     options: SharedFsMountBackendOptions = {}
 ): SharedFsMountBackend & { dispose(): void } => {
     const handles = new Map<number, OpenHandle>();
@@ -1135,6 +1162,20 @@ export const createSharedFsMountBackend = (
     // Directory mtime and ctime: per-mount change stamps that move exactly
     // when a directory's visible names may have changed (see DirectoryStamps).
     const stamps = new DirectoryStamps({ now: clock });
+    // Sealed and ignored paths are served from the local overlay, and the
+    // target then refuses to change any of them (guardSharedMutations).
+    const local =
+        options.localOverlay &&
+        bindMountLocalOverlay(options.localOverlay, givenTarget, {
+            allocateHandle: () => nextHandle++,
+            bumpStamp: (nodeId) => stamps.bump(nodeId),
+        });
+    const target = local
+        ? guardSharedMutations(
+              givenTarget,
+              (path) => local.route(normalizeFsPath(path)) !== undefined
+          )
+        : givenTarget;
     /**
      * Where this mount's consumers may have seen each node's name (node id ->
      * parent stamp key), refreshed on every serve. A move or delete of a
@@ -1177,7 +1218,7 @@ export const createSharedFsMountBackend = (
     // delegation), never to any other target: such a target may clone,
     // serialize, or validate its options. Evaluated only while profiling.
     const passesWriteFileProfile =
-        profile !== undefined && acceptsSharedFsWriteFileProfile(target);
+        profile !== undefined && acceptsSharedFsWriteFileProfile(givenTarget);
 
     const requireRemoveMutationResult = (
         value: unknown,
@@ -1532,6 +1573,7 @@ export const createSharedFsMountBackend = (
      * or disappeared from, and the conflict directories.
      */
     const onNamespaceChange = (change: SharedFsNamespaceChange) => {
+        local?.namespaceChanged();
         const keys = new Set<string>();
         let naming = false;
         const unserve = (nodeId: string, parentId: string | undefined) => {
@@ -3072,24 +3114,7 @@ export const createSharedFsMountBackend = (
         parsedFlags: ReturnType<typeof parseFlags>,
         createMode?: number
     ): Promise<number> => {
-        if (!parsedFlags.read && !parsedFlags.write) {
-            throw new SharedFsBackendError(
-                "EINVAL",
-                "Open has no valid access mode: " + normalized
-            );
-        }
-        if (parsedFlags.exclusive && !parsedFlags.create) {
-            throw new SharedFsBackendError(
-                "EINVAL",
-                "O_EXCL requires O_CREAT: " + normalized
-            );
-        }
-        if (parsedFlags.truncate && !parsedFlags.write) {
-            throw new SharedFsBackendError(
-                "EINVAL",
-                "O_TRUNC requires write access: " + normalized
-            );
-        }
+        assertValidOpenFlags(normalized, parsedFlags);
         const mutatingOpen =
             parsedFlags.write || parsedFlags.create || parsedFlags.truncate;
         // Read-only for good, not until readiness: EROFS, never EAGAIN.
@@ -3363,6 +3388,8 @@ export const createSharedFsMountBackend = (
                 if (isConflictPath(normalized)) {
                     return getattrConflict(normalized);
                 }
+                const route = local?.route(normalized);
+                if (route) return local!.getattr(route);
                 const pending = pendingDirtyState(normalized);
                 if (pending) {
                     // Uncommitted writes are visible to stat like on a local
@@ -3413,14 +3440,27 @@ export const createSharedFsMountBackend = (
                 if (isConflictPath(normalized)) {
                     return readdirConflict(normalized, includeStats);
                 }
-                return settledRead(
+                const route = local?.route(normalized);
+                if (route) return local!.readdir(route, includeStats);
+                // The directory's node, when its listing names it.
+                let directoryKey: string | undefined;
+                const entries = await settledRead(
                     () => target.list(normalized),
                     () => nsSeq,
                     (listed, settled) => {
                         let listedKey: string | undefined =
                             normalized === "/" ? ROOT_NODE_ID : undefined;
+                        // A shared entry at a path served locally is hidden.
+                        const shown = local
+                            ? listed.filter((entry) => {
+                                  listedKey ??= entry.parentId;
+                                  return !local.route(
+                                      joinFsPath(normalized, entry.name)
+                                  );
+                              })
+                            : listed;
                         const byName = new Map<string, SharedFsDirent>(
-                            listed.map((entry) => {
+                            shown.map((entry) => {
                                 listedKey ??= entry.parentId;
                                 serve(entry.nodeId, entry.parentId);
                                 const kind =
@@ -3502,9 +3542,18 @@ export const createSharedFsMountBackend = (
                                 markPath(normalized);
                             }
                         }
+                        directoryKey = listedKey;
                         return entries;
                     }
                 );
+                return local
+                    ? local.withLocalEntries(
+                          normalized,
+                          directoryKey,
+                          entries,
+                          includeStats
+                      )
+                    : entries;
             });
         },
 
@@ -3515,15 +3564,18 @@ export const createSharedFsMountBackend = (
         ) {
             return wrap(() => {
                 const parsed = parseFlags(flags);
-                return openPathAdmitted(
-                    kernelPath(path, parsed.create),
-                    parsed,
-                    posixModeArg(createMode)
-                );
+                const normalized = kernelPath(path, parsed.create);
+                const mode = posixModeArg(createMode);
+                const route = local?.route(normalized);
+                if (route) return local!.open(route, parsed, mode);
+                return openPathAdmitted(normalized, parsed, mode);
             });
         },
 
         async read(handle: number, size: number, offset: number) {
+            if (local?.owns(handle)) {
+                return wrap(() => local.read(handle, size, offset));
+            }
             const openHandle = requireHandle(handle);
             if (!openHandle.read) {
                 throw new SharedFsBackendError(
@@ -3544,6 +3596,9 @@ export const createSharedFsMountBackend = (
         },
 
         async write(handle: number, data: Uint8Array, offset: number) {
+            if (local?.owns(handle)) {
+                return wrap(() => local.write(handle, data, offset));
+            }
             const openHandle = requireHandle(handle);
             if (openHandle.closing) {
                 throw badHandle(handle);
@@ -3591,6 +3646,9 @@ export const createSharedFsMountBackend = (
 
         async truncate(targetRef: number | string, size: number) {
             return wrap(async () => {
+                if (typeof targetRef === "number" && local?.owns(targetRef)) {
+                    return local.truncateHandle(targetRef, size);
+                }
                 if (typeof targetRef === "number") {
                     const openHandle = requireHandle(targetRef);
                     if (openHandle.closing) {
@@ -3608,6 +3666,8 @@ export const createSharedFsMountBackend = (
                 }
                 const normalized = kernelPath(targetRef);
                 if (isConflictPath(normalized)) throw readOnlyError(normalized);
+                const route = local?.route(normalized);
+                if (route) return local!.truncatePath(route, size);
                 assertWriteReady(`Truncate ${normalized}`);
                 const handle = await openPathAdmitted(normalized, {
                     read: true,
@@ -3629,6 +3689,7 @@ export const createSharedFsMountBackend = (
         },
 
         async flush(handle: number) {
+            if (local?.owns(handle)) return wrap(() => local.flush(handle));
             const openHandle = requireHandle(handle);
             // Linux sends a flush on every close(2), also of a duplicate
             // descriptor. A shell redirect (`cmd > file`) opens with O_TRUNC,
@@ -3651,12 +3712,14 @@ export const createSharedFsMountBackend = (
         },
 
         async fsync(handle: number) {
+            if (local?.owns(handle)) return wrap(() => local.fsync(handle));
             const openHandle = requireHandle(handle);
             const cutoff = openHandle.state.mutationGeneration;
             return wrap(() => localCommit(openHandle.state, cutoff, "fsync"));
         },
 
         async release(handle: number) {
+            if (local?.owns(handle)) return wrap(() => local.release(handle));
             const openHandle = handles.get(handle);
             if (!openHandle) {
                 return;
@@ -3723,6 +3786,8 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const normalized = kernelPath(path, true);
                 if (isConflictPath(normalized)) throw readOnlyError(normalized);
+                const route = local?.route(normalized);
+                if (route) return local!.mkdir(route);
                 assertWriteReady(`mkdir ${normalized}`);
                 return withNamespaceTransition(
                     `mkdir ${normalized}`,
@@ -3766,6 +3831,8 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const normalized = kernelPath(path);
                 if (isConflictPath(normalized)) throw readOnlyError(normalized);
+                const route = local?.route(normalized);
+                if (route) return local!.rmdir(route);
                 assertWriteReady(`rmdir ${normalized}`);
                 return withNamespaceTransition(
                     `rmdir ${normalized}`,
@@ -3787,6 +3854,15 @@ export const createSharedFsMountBackend = (
                                 `Path is not a directory: ${normalized}`
                             );
                         }
+                        if (
+                            local &&
+                            (await local.holdsLocalEntries(
+                                normalized,
+                                entry.nodeId
+                            ))
+                        ) {
+                            throw directoryHoldsLocalEntries(normalized);
+                        }
                         try {
                             const result = await target.mutateNamespaceForMount(
                                 {
@@ -3797,6 +3873,7 @@ export const createSharedFsMountBackend = (
                                 }
                             );
                             requireRemoveMutationResult(result, entry.nodeId);
+                            local?.namespaceChanged();
                         } catch (error) {
                             // Even an untyped error can be deterministic
                             // (notably ENOTEMPTY). Re-read every descriptor's
@@ -3824,6 +3901,24 @@ export const createSharedFsMountBackend = (
                 const toPath = kernelPath(to, true);
                 for (const path of [fromPath, toPath]) {
                     if (isConflictPath(path)) throw readOnlyError(path);
+                }
+                const fromRoute = local?.route(fromPath);
+                const toRoute = local?.route(toPath);
+                if (fromRoute && toRoute) {
+                    return local!.rename(fromRoute, toRoute);
+                }
+                if (fromRoute || toRoute) {
+                    // Between local and shared paths nothing moves: EXDEV,
+                    // so mv and file managers copy instead.
+                    const exists = fromRoute
+                        ? await local!.exists(fromRoute)
+                        : provisionalStatesByPath.has(fromPath) ||
+                          (await findEntry(target, fromPath)) !== undefined;
+                    if (!exists) throw notFound(fromPath);
+                    throw new SharedFsBackendError(
+                        "EXDEV",
+                        `Cannot rename between a path kept local by this mount and a shared one: ${fromPath} to ${toPath}`
+                    );
                 }
                 assertWriteReady(`rename ${fromPath} to ${toPath}`);
                 if (fromPath === toPath) {
@@ -3925,6 +4020,16 @@ export const createSharedFsMountBackend = (
                             target,
                             toPath
                         );
+                        if (
+                            local &&
+                            destination?.kind === "directory" &&
+                            (await local.holdsLocalEntries(
+                                toPath,
+                                destination.nodeId
+                            ))
+                        ) {
+                            throw directoryHoldsLocalEntries(toPath);
+                        }
                         // The move's event names only the destination; the
                         // source directory is bumped through this placement.
                         serve(source.nodeId, source.parentId);
@@ -3953,6 +4058,7 @@ export const createSharedFsMountBackend = (
                                 destination?.nodeId ?? null,
                                 parentNodeId
                             );
+                            local?.namespaceChanged();
                         } catch (error) {
                             if (
                                 error instanceof
@@ -4015,6 +4121,8 @@ export const createSharedFsMountBackend = (
             return wrap(async () => {
                 const normalized = kernelPath(path);
                 if (isConflictPath(normalized)) throw readOnlyError(normalized);
+                const route = local?.route(normalized);
+                if (route) return local!.unlink(route);
                 assertWriteReady(`unlink ${normalized}`);
                 return withNamespaceTransition(
                     `unlink ${normalized}`,
@@ -4104,6 +4212,10 @@ export const createSharedFsMountBackend = (
                 const normalized = kernelPath(path);
                 if (normalized === "/") return;
                 if (isConflictPath(normalized)) throw readOnlyError(normalized);
+                const route = local?.route(normalized);
+                if (route) {
+                    return local!.setattr(route, { mode: posixMode, mtimeMs });
+                }
                 assertWriteReady(`setattr ${normalized}`);
                 return withOpenPathLock(normalized, async () => {
                     for (;;) {
@@ -4221,6 +4333,8 @@ export const createSharedFsMountBackend = (
                 const normalized = kernelPath(path, true);
                 if (normalized === "/") throw alreadyExists(normalized);
                 if (isConflictPath(normalized)) throw readOnlyError(normalized);
+                const route = local?.route(normalized);
+                if (route) return local!.symlink(linkTarget, route);
                 assertWriteReady(`symlink ${normalized}`);
                 return withNamespaceTransition(
                     `symlink ${normalized}`,
@@ -4266,6 +4380,8 @@ export const createSharedFsMountBackend = (
                 if (normalized === "/" || isConflictPath(normalized)) {
                     throw notLink();
                 }
+                const route = local?.route(normalized);
+                if (route) return local!.readlink(route);
                 let entry = await findEntry(target, normalized);
                 for (;;) {
                     if (!entry) throw notFound(normalized);
@@ -4294,6 +4410,8 @@ export const createSharedFsMountBackend = (
         },
 
         async drain() {
+            // Local descriptors close; their data is already on disk.
+            if (local) await local.drain();
             const failed: Array<{ path: string; error: unknown }> = [];
             for (const [handle, { state }] of [...handles]) {
                 await backend
@@ -4306,6 +4424,7 @@ export const createSharedFsMountBackend = (
         dispose() {
             unsubscribe?.();
             unsubscribe = undefined;
+            local?.dispose();
         },
     };
 

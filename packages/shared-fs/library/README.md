@@ -1304,6 +1304,8 @@ Native mounts expose the exec bit, mtime and symlinks (see
 [File metadata and symlinks](#file-metadata-and-symlinks)): `chmod` keeps only
 the exec bit, `utimens` sets mtime (atime and ctime report it), an `O_CREAT`
 mode keeps its exec bit, and `symlink` and `readlink` create and read links.
+Paths kept on this machine keep every permission bit (see
+[Local overlay for sealed and ignored paths](#local-overlay-for-sealed-and-ignored-paths)).
 `chown` succeeds without storing an owner; files report the mounting user.
 Directories report `0755`. Their mtime and ctime are change stamps kept by
 each mount: they change when a name in the directory appears, disappears or is
@@ -1388,7 +1390,11 @@ optional `guard` argument vets before anything is written: `IgnoreAwareFs`
 checks both that path and the one the mount last saw, so a save that would
 land at an ignored path is refused as a `writeFile()` there is. Without the
 optional `writeNodeForMount()`, the fence of a detached descriptor fails with
-`EIO` and keeps its bytes. For
+`EIO` and keeps its bytes. With a `localOverlay`, paths kept on this
+machine never reach the target's mutators: the backend refuses them in
+`writeFile()`, `setMetadata()`, `mkdir()` and `mutateNamespaceForMount()`
+with `EACCES` without calling the target, and the overlay itself only looks
+paths up through `stat()`, `nodeForMount()` and `ignoreCheck()`. For
 files, `stat()` must include `versionId`, `contentHash`, `size`, and
 `headVersionIds`, matching what `readVersionForMount()` returns.
 `writeFile()` must hash its input itself, honor `noOpIfHeadVersionIds`, and
@@ -1508,6 +1514,86 @@ detaching it (for a truncate-only change, only the descriptor that emptied the
 file does). Mutations admitted later through sibling descriptors remain
 buffered for a later fence. The current target interface still has no
 backend-independent hardware cache or power-loss barrier.
+
+### Local overlay for sealed and ignored paths
+
+A mount can keep `node_modules` (the filesystem's sealed names) and, with an
+ignore-aware target, ignored paths on its own machine, so package managers
+and build tools work in a mount without publishing their output:
+
+```ts
+import {
+    createSharedFsMountBackend,
+    localOverlayDirectory,
+    openMountLocalOverlay,
+} from "@peerbit/shared-fs";
+
+const localOverlay = await openMountLocalOverlay({
+    directory: localOverlayDirectory(stateDirectory, fs.address),
+    address: fs.address,
+    sealedNames: fs.program.sealedIgnoredNames,
+});
+const backend = createSharedFsMountBackend(fs, { localOverlay });
+```
+
+Every path at or below a sealed name (byte-exact: `Node_Modules` is an
+ordinary shared name) or an ignored boundary (`ignoreCheck()` of an
+`IgnoreAwareFs`) is served from that directory, never from the target.
+The shallowest of the two is the boundary; nested `node_modules` are
+ordinary local directories, and `/` and `/.peerbit-conflicts` are never
+local. Local paths are files, directories and symlinks with ordinary POSIX
+behaviour: every permission bit, `utimens` (on a symlink, the link's own
+time), truncate by path and by handle, `O_APPEND`, renames inside the local
+tree, `unlink` of an open file, `rmdir`. Nothing there is written to the
+shared log or the block store, waited for by `persistLocalWrites()` or shown
+in `/.peerbit-conflicts`, and none of it reaches another replica.
+
+- A shared entry at a local path, such as another peer's file named
+  `node_modules`, is hidden in the mount. It stays in the store, in `list()`
+  and `readFile()`, and on other peers.
+- A rename between a local and a shared path fails with `EXDEV` (`ENOENT`
+  for a missing source) and changes nothing; `mv` and file managers then
+  copy instead, so `mv node_modules node_modules.bak` copies the tree into
+  the shared namespace and publishes it.
+- A shared directory holding visible local entries cannot be removed or
+  renamed over (`ENOTEMPTY`) until they are gone.
+- Paths are classified at every lookup, so an ignore rule change applies to
+  the next one; an open descriptor stays on the side it was opened on.
+- Names created below a boundary follow the shared naming rules (255 bytes,
+  no control characters, no `\`); below the boundary, names follow the
+  host's case rules, so they are case-insensitive on default macOS and
+  Windows volumes, as in a local install. A host error maps onto the
+  backend's codes, including `ENOSPC`, `EDQUOT`, `EPERM` (a Windows sharing
+  violation too) and `EXDEV`; anything else is `EIO` and is printed once per
+  operation and code.
+
+The directory holds `meta.json` (`{"format":1,"address":...}`) and, under
+`n/<hex of a node id>/`, the boundary entries of the shared directory with
+that node id (`726f6f74` is `/`). Local entries therefore follow their shared
+directory through renames, by this mount or another writer. When another
+writer deletes that directory, its local entries stay on disk, hidden, until
+it is restored or they are deleted; `localOverlay.detached(fs)` counts such
+directories. Opening checks `meta.json` (another address or format fails with
+`EINVAL`; move or delete the directory, nothing is migrated) and removes
+empty attachment directories, the only removal it makes. To discard the local
+entries, stop the mount and delete the directory. One backend serves from an
+overlay (a second fails with `EINVAL`); do not open two overlays on the same
+directory at once. `localOverlayDirectory(stateDirectory, address)` is
+`<stateDirectory>/shared-fs-local-overlay/<first 32 hex of sha256(address)>`.
+
+On Windows, names the host cannot hold (`: * ? " < > |`, a trailing dot or
+space, `CON`, `NUL`, `COM1` and the other device names) fail with `EINVAL`;
+symlinks need the symlink privilege (Developer Mode or an elevated account);
+a symlink created directly at a boundary name fails with `EXDEV`, because
+WinFsp first creates every link under a hidden name in its directory and
+renames it into place; and deep trees pass 260 characters, so delete the
+directory with a tool that supports long paths.
+
+The mount backend's error codes include `EXDEV`, `ENOSPC`, `EPERM` and
+`EDQUOT`, with or without a local overlay: a rename across an ignore
+boundary fails with `EXDEV` (it used to be `EACCES`), and a full or
+over-quota disk under the store reports `ENOSPC` or `EDQUOT` instead of
+`EIO`.
 
 ### Opt-in mounted-path profiling
 

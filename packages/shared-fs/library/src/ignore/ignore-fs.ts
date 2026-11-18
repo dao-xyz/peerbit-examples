@@ -31,8 +31,9 @@ import { IgnoreFilteredWatcher } from "./watch-filter.js";
  * Every top-level operation snapshots ONE compiled rule set at entry, so
  * a rule rollout never flips verdicts under an in-flight operation.
  *
- * v1 ships reject mode; the machine-local overlay ("divert") is a
- * follow-up and openSharedFs refuses the option until it lands.
+ * A mount serves ignored paths from its local overlay
+ * (createSharedFsMountBackend's localOverlay); openSharedFs still refuses
+ * the library-level divert mode.
  */
 export class IgnoreAwareFs extends SharedFsHandle {
     constructor(
