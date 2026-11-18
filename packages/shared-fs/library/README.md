@@ -1402,9 +1402,12 @@ which `SharedFsHandle`, `IgnoreAwareFs` and `SharedFileSystem` provide (and
 from `parentId` on `stat()` and `list()` entries). A target without it runs in
 a degraded mode: directory times then move only on the mount's own creates,
 `mkdir`, `rmdir`, `unlink`, `rename` and `symlink`, never for other peers'
-changes. Call the backend's `dispose()` to unsubscribe when the mount stops
-(it is optional on the `SharedFsMountBackend` type, so existing
-implementations stay valid). The `servedLimit` option bounds how many listed
+changes. When the mount stops, call the backend's `drain()` first: it
+releases every open descriptor as a close would, so bytes still buffered in
+open files are committed. Then `persistLocalWrites()` on the filesystem
+handle can wait until another replica holds what this open wrote, and
+`dispose()` unsubscribes (both backend methods are optional on the
+`SharedFsMountBackend` type, so existing implementations stay valid). The `servedLimit` option bounds how many listed
 names the mount remembers for that (default 262,144); forgetting one moves
 its directory's time instead.
 

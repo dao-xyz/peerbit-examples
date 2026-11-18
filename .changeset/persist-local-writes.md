@@ -5,8 +5,8 @@
 `persistLocalWrites({ minAcks = 1, timeout, signal })` awaits remote receipts
 for every entry this replica wrote since it opened (its naming events,
 versions and changeset manifests, and the chunks those versions reference)
-and for the naming heads their paths resolve through, an earlier session's
-included, on `prepareForDisposal`'s receipt path. It runs until none is left,
+and for the naming heads of their nodes and of every directory above them,
+an earlier session's included, on `prepareForDisposal`'s receipt path. It runs until none is left,
 so entries written while it runs are fenced too. Unlike that whole-store
 fence, other writers' arrivals do not fail it, an entry deleted or put again
 under it (GC, a chunk re-linked or written again) starts it over, and an entry

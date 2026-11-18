@@ -24,7 +24,7 @@ import {
 } from "../index.js";
 
 /**
- * mount --persist-on-exit (roadmap N2), through the mount's shutdown seams:
+ * mount --persist-on-exit, through the mount's shutdown seams:
  * waitForTermination (signals and the stdin `shutdown` line), stopMountSession
  * (unmount, drain, persist, stop) and persistOnExit, with the library's mount
  * backend driven as the native adapter drives it. Real Peerbit peers over
