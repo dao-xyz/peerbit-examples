@@ -583,6 +583,13 @@ comes back during the wait can take longer than 30 s to confirm a few hundred
 entries: raise the timeout for that too. `--no-persist-on-exit` skips the wait
 only.
 
+If the native adapter exits on its own once the mount is up (a crash,
+`kill -9`, the out-of-memory killer), `mount` prints its exit code or signal
+and the adapter's last 20 stderr lines, then stops as on a first request,
+persist-on-exit included, and exits 70. An adapter stopped from outside, by
+`peerbit-fs unmount` or `fusermount -u`/`umount`, exits 0: `mount` says so and
+stops the same way.
+
 A second request aborts the wait while it runs (the list is printed, then
 `mount` exits at once, without stopping Peerbit) and otherwise exits at once.
 One within 100 ms of the last is taken for the copy of a Ctrl-C that npm, pnpm
@@ -591,13 +598,58 @@ and npx pass on: it only prints a hint. Windows has no SIGTERM: `taskkill` and
 leaves about 10 s.
 
 Exit codes: 0 stopped; 1 failed, or an open file could not be saved
-(`persist-on-exit: unsaved {"path":...}`); 75 the wait gave up, with one
+(`persist-on-exit: unsaved {"path":...}`); 70 the adapter exited on its own;
+75 the wait gave up, with one
 `persist-on-exit: unacknowledged {"path":...,"ids":[...]}` line per path (ids
 with no path: `"path":null`; 200, then `unlisted {"paths":n}`) for writes
 that stay saved here with no receipt; 130 a second request stopped it. 1 is
-kept over 75 and 130, and 75 over 130. Unlike `prepare-disposal`, it fences
-only this session's own writes, while other writers keep writing; retire a
-machine with `prepare-disposal`.
+kept over 70, 75 and 130, 70 over 75 and 130, and 75 over 130. Unlike
+`prepare-disposal`, it fences only this session's own writes, while other
+writers keep writing; retire a machine with `prepare-disposal`.
+
+## Run a mount under a supervisor
+
+`peerbit-fs mount` and its native adapter end together, so a supervisor only
+has to watch `mount`:
+
+- A dead adapter ends `mount` with exit code 70, after the stop above, so a
+  supervisor that restarts on failure mounts again.
+- A dead `mount`, even one killed with `kill -9`, ends the adapter and its
+  mount. The adapter keeps a second IPC connection to `mount` open, and
+  unmounts and exits when it closes, on every OS. On Linux the kernel also
+  sends it SIGHUP when `mount` exits. On Windows, Node runs the adapter in a
+  job object that ends it with `mount`, and WinFsp removes the drive.
+- An adapter that was killed cannot unmount: Linux and macOS keep a
+  disconnected mount there, which would block the next mount. On Linux it
+  fails with `Transport endpoint is not connected`. The next `mount` at that
+  mountpoint unmounts it first, and says so, when the mount table shows it is
+  a mount that a peerbit-fs adapter of the same user left (source
+  `peerbit-shared-fs`). A live mount is left alone; at any other
+  disconnected mount, `mount` fails and names the command to run
+  (`fusermount3 -u`, or `diskutil unmount force` on macOS).
+
+systemd, with a stop timeout above `--persist-timeout-ms`:
+
+```ini
+[Service]
+ExecStart=/path/to/peerbit-fs mount ADDRESS /srv/shared
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=60
+```
+
+`systemctl stop` sends SIGTERM, a shutdown request. On macOS, launchd restarts
+a job that exits non-zero with these keys:
+
+```xml
+<key>KeepAlive</key>
+<dict>
+    <key>SuccessfulExit</key>
+    <false/>
+</dict>
+<key>ExitTimeOut</key>
+<integer>60</integer>
+```
 
 ## Safely dispose of a machine
 
@@ -611,10 +663,10 @@ peerbit-fs prepare-disposal "$ADDRESS" --min-acks 1
 # Only after both commands exit successfully, dispose of the machine or its state.
 ```
 
-`peerbit-fs unmount "$MOUNTPOINT"` only detaches the OS mountpoint; it does not
-stop a separately running `peerbit-fs mount` process. If manual unmounting is
-needed, still terminate that original process and wait for it to exit before
-opening the same Peerbit state directory for the barrier.
+`peerbit-fs unmount "$MOUNTPOINT"` (Linux and macOS) detaches the OS
+mountpoint, and the `peerbit-fs mount` process serving it then stops as on
+Ctrl-C. Wait for that process to exit before opening the same Peerbit state
+directory for the barrier.
 
 `--min-acks <number>` defaults to `1`, `--timeout-ms <number>` bounds the
 barrier after the filesystem has opened, and `--json` emits a machine-readable

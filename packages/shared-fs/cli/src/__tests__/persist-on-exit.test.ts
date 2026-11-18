@@ -15,6 +15,7 @@ import {
     type SharedFsMountBackend,
 } from "@peerbit/shared-fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reportAdapterExit } from "../external-native-adapter.js";
 import {
     persistOnExit,
     runCli,
@@ -163,23 +164,112 @@ describe("mount shutdown requests", () => {
     /** A stop that runs until released, and the shutdown it was given. */
     const pendingStop = (
         host: ReturnType<typeof fakeHost>,
-        input = new PassThrough()
+        input = new PassThrough(),
+        ended?: Promise<unknown>
     ) => {
-        const state: { shutdown?: MountShutdown; release(): void } = {
-            release: () => {},
-        };
+        const state: {
+            shutdown?: MountShutdown;
+            stops: number;
+            release(): void;
+        } = { stops: 0, release: () => {} };
         const stopped = waitForTermination(
             (shutdown) => {
                 state.shutdown = shutdown;
+                state.stops++;
                 return new Promise<void>(
                     (resolve) => (state.release = resolve)
                 );
             },
             host as any,
-            input
+            input,
+            ended
         );
         return Object.assign(state, { stopped, input });
     };
+
+    /** Runs what a settled promise scheduled. */
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    it("stops when the mount ends on its own (its adapter exited) as on a first request, and not again during a stop under way", async () => {
+        let adapterExited!: () => void;
+        const host = fakeHost();
+        const stop = pendingStop(
+            host,
+            new PassThrough(),
+            new Promise<void>((resolve) => (adapterExited = resolve))
+        );
+        await settle();
+        expect(stop.stops).toBe(0);
+        adapterExited();
+        await settle();
+        expect(stop.stops).toBe(1);
+        expect(host.exit).not.toHaveBeenCalled();
+        // A Ctrl-C now is a second request: out at once, with the status the
+        // adapter's exit set.
+        process.exitCode = 70;
+        host.ms += 1_000;
+        host.emit("SIGINT");
+        expect(host.exit).toHaveBeenCalledWith(70);
+        stop.release();
+        await stop.stopped;
+        expect(stop.stops).toBe(1);
+
+        // An exit reported while a stop runs (the adapter died just before
+        // the request) is not a second request.
+        let lateExit!: () => void;
+        const busyHost = fakeHost();
+        const busy = pendingStop(
+            busyHost,
+            new PassThrough(),
+            new Promise<void>((resolve) => (lateExit = resolve))
+        );
+        busyHost.emit("SIGTERM");
+        expect(busy.stops).toBe(1);
+        lateExit();
+        await settle();
+        expect(busy.stops).toBe(1);
+        expect(busyHost.exit).not.toHaveBeenCalled();
+        busy.release();
+        await busy.stopped;
+    });
+
+    it("keeps an adapter failure's 70 over 75 and 130, and a failed step's 1 over 70", async () => {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        reportAdapterExit(
+            { code: null, signal: "SIGKILL", stderr: [] },
+            () => {}
+        );
+        expect(process.exitCode).toBe(70);
+        // persist-on-exit gives up: 75 is not set over it.
+        await persistOnExit(givingUp(1) as any, {
+            persistOnExit: true,
+            persistTimeoutMs: 1,
+        });
+        expect(process.exitCode).toBe(70);
+        // A second request exits with it, not 130.
+        const host = fakeHost();
+        const stop = pendingStop(host);
+        host.emit("SIGINT");
+        host.ms += 1_000;
+        host.emit("SIGINT");
+        expect(host.exit).toHaveBeenCalledWith(70);
+        stop.release();
+        await stop.stopped;
+        // A stop step that fails exits 1 over it; every step still runs.
+        const order: string[] = [];
+        await expect(
+            stopMountSession({
+                ipc: {
+                    close: async () => {
+                        throw new Error("close failed");
+                    },
+                },
+                stopPeerbit: async () => void order.push("peerbit"),
+            })
+        ).rejects.toThrow("close failed");
+        expect(order).toEqual(["peerbit"]);
+        expect(process.exitCode).toBe(1);
+    });
 
     it("ignores a wrapper's copy of a request with a hint, aborts a wait under way, and exits at once otherwise", async () => {
         const lines: string[] = [];
@@ -1171,11 +1261,25 @@ describe("peerbit-fs mount as a process", () => {
             await call("write", [handle, { $bytes: null }, 0], bytes);
             if (name === "/closed.txt") await call("release", [handle]);
         }
+        process.stdout.write("stand-in adapter pid " + process.pid + "\\n");
+        process.stderr.write("stand-in adapter " + process.pid + " serving\\n");
         process.stdout.write("peerbit-shared-fs-native ready\\n");
         setInterval(() => {}, 1 << 30);
     `;
 
-    it("stops on a `shutdown` line on its stdin: saves the open file, waits for the replica, exits 0", async () => {
+    /**
+     * Runs `test` against a mount process with the stand-in adapter, once
+     * its receiver replica holds /closed.txt; then kills what is left.
+     */
+    const withMountProcess = async (
+        test: (mount: {
+            child: ReturnType<typeof spawn>;
+            errors: string[];
+            exited: Promise<number | null>;
+            receiver: SharedFsHandle;
+            adapterPid: number;
+        }) => Promise<void>
+    ) => {
         const base = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-mount-process-")
         );
@@ -1281,25 +1385,12 @@ describe("peerbit-fs mount as a process", () => {
                 })(),
                 "the receiver opens and holds /closed.txt"
             );
-
-            // As a supervisor on Windows asks; the pipe stays open.
-            child.stdin!.write("shutdown\r\n");
-            expect(
-                await within(exited, "the mount exits", FENCE_MS),
-                errors.join("\n")
-            ).toBe(0);
-            expect(persistLines(errors)).toEqual([
-                expect.stringMatching(
-                    /^persist-on-exit: waiting up to 20000 ms for receipts for \d+ entries$/
-                ),
-                expect.stringMatching(
-                    /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
-                ),
-            ]);
-            // Drained at the stop and fenced: here with the writer gone.
-            expect(text(await receiver.readFile("/open.txt"))).toBe(
-                "/open.txt"
+            const adapterPid = Number(
+                output
+                    .find((line) => line.startsWith("stand-in adapter pid "))
+                    ?.slice("stand-in adapter pid ".length)
             );
+            await test({ child, errors, exited, receiver, adapterPid });
         } finally {
             child?.kill("SIGKILL");
             await within(exited, "the mount is gone").catch(() => {});
@@ -1311,5 +1402,58 @@ describe("peerbit-fs mount as a process", () => {
                 retryDelay: 200,
             });
         }
-    });
+    };
+
+    const fenced = [
+        expect.stringMatching(
+            /^persist-on-exit: waiting up to 20000 ms for receipts for \d+ entries$/
+        ),
+        expect.stringMatching(
+            /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
+        ),
+    ];
+
+    it("stops on a `shutdown` line on its stdin: saves the open file, waits for the replica, exits 0", () =>
+        withMountProcess(async ({ child, errors, exited, receiver }) => {
+            // As a supervisor on Windows asks; the pipe stays open.
+            child.stdin!.write("shutdown\r\n");
+            expect(
+                await within(exited, "the mount exits", FENCE_MS),
+                errors.join("\n")
+            ).toBe(0);
+            expect(persistLines(errors)).toEqual(fenced);
+            // Drained at the stop and fenced: here with the writer gone.
+            expect(text(await receiver.readFile("/open.txt"))).toBe(
+                "/open.txt"
+            );
+        }));
+
+    it("ends when its adapter is killed after readiness: reports it, saves the open file, waits for the replica, exits 70", () =>
+        withMountProcess(async ({ errors, exited, receiver, adapterPid }) => {
+            expect(adapterPid).toBeGreaterThan(0);
+            const killed = performance.now();
+            // kill -9 on POSIX, TerminateProcess on Windows.
+            process.kill(adapterPid, "SIGKILL");
+            expect(
+                await within(exited, "the mount exits", FENCE_MS),
+                errors.join("\n")
+            ).toBe(70);
+            // Reported only: the 2 s bound is the Linux smoke's.
+            console.info(
+                `mount exited ${Math.round(performance.now() - killed)} ms after its adapter was killed`
+            );
+            expect(errors).toEqual(
+                expect.arrayContaining([
+                    expect.stringMatching(
+                        /^Native adapter exited after mount readiness: (code=null signal=SIGKILL|code=1 signal=null); stopping the mount \(exit status 70\)\.$/
+                    ),
+                    `native adapter stderr: stand-in adapter ${adapterPid} serving`,
+                ])
+            );
+            // The same stop as a shutdown request: drained and fenced.
+            expect(persistLines(errors)).toEqual(fenced);
+            expect(text(await receiver.readFile("/open.txt"))).toBe(
+                "/open.txt"
+            );
+        }));
 });

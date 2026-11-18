@@ -2,13 +2,22 @@
 "@peerbit/shared-fs-cli": minor
 ---
 
-The native adapter now ends with `peerbit-fs mount`, and a mount that a killed
-adapter left behind no longer blocks the next one:
+`peerbit-fs mount` and its native adapter now end together, so a supervisor
+such as systemd or launchd only has to watch `mount`:
 
+- An adapter that exits on its own after the mount is up (a crash, `kill -9`,
+  the out-of-memory killer) is reported with its exit code or signal and its
+  last 20 stderr lines, and the mount stops as on a first shutdown request:
+  open files are saved and persist-on-exit runs. `mount` then exits 70; a
+  failed step's 1 is kept over 70, and 70 over 75 and 130. Before, `mount`
+  kept running with nothing mounted.
+- An adapter stopped from outside (`peerbit-fs unmount`, `fusermount -u`,
+  `umount`) exits 0, and the mount stops the same way, with exit code 0.
+  `peerbit-fs unmount` no longer leaves its `mount` process running.
 - An adapter whose `mount` dies, even by `kill -9`, unmounts and exits: it
-  holds a second IPC connection to `mount` and stops when that closes. On
-  Windows, Node already ends the adapter with `mount`, and WinFsp removes the
-  drive.
+  holds a second IPC connection to `mount` and stops when that closes, and on
+  Linux the kernel also sends it SIGHUP when `mount` exits. On Windows, Node
+  already ends the adapter with `mount`, and WinFsp removes the drive.
 - A mountpoint left disconnected by a killed adapter, which fails with
   `Transport endpoint is not connected` on Linux, no longer blocks the next
   mount: the next adapter there unmounts it first, but only when the mount
