@@ -41,8 +41,9 @@ const packages = [
         directory: "packages/shared-fs/cli",
         name: "@peerbit/shared-fs-cli",
         // #434's --peer redial with N4's conflicts gate: about 342 KB.
-        // Persist-on-exit: about 356 KB.
-        maxUnpackedBytes: 360_000,
+        // Persist-on-exit: about 356 KB. Refusing valued boolean flags:
+        // about 363 KB.
+        maxUnpackedBytes: 370_000,
         requiredPaths: [
             "LICENSE",
             "README.md",
