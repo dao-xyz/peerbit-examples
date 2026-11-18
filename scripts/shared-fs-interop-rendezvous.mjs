@@ -20,6 +20,10 @@
 //   jobs;
 // - when the arrival budget runs out, counted from when the peer jobs were
 //   created, naming the peers that are not ready;
+// - at once, when listing the jobs fails in a way that a retry cannot fix:
+//   HTTP 401, 403 other than a rate limit, 404, or gh without a token.
+//   Other failed listings (network errors, timeouts, HTTP 5xx and 429, rate
+//   limits) are retried;
 // - after a grace period, when an expected peer has no job in this run, or
 //   this job's own presence step never shows up (a renamed job or step).
 //
@@ -86,14 +90,17 @@ const parseArgs = (args) => {
     };
 };
 
-const listJobs = (repository, runId) =>
+/**
+ * Runs gh. A failure carries the first line gh printed as its message, all
+ * of it as `output`, gh's exit code and the HTTP status, when gh names one:
+ * `gh api` prints "gh: <message> (HTTP <status>)", other commands "HTTP
+ * <status>: <message> (<url>)".
+ */
+const gh = (args) =>
     new Promise((resolve, reject) => {
         execFile(
             "gh",
-            [
-                "api",
-                `repos/${repository}/actions/runs/${runId}/jobs?per_page=100`,
-            ],
+            args,
             {
                 timeout: 60_000,
                 maxBuffer: 32 * 1024 * 1024,
@@ -103,29 +110,66 @@ const listJobs = (repository, runId) =>
                 if (error) {
                     const detail =
                         String(stderr ?? "").trim() ||
-                        (error.killed ? "gh api timed out" : error.message);
+                        (error.killed
+                            ? `gh ${args[0]} timed out`
+                            : error.message);
                     reject(
                         Object.assign(new Error(detail.split("\n")[0]), {
+                            output: detail,
                             code: error.code,
+                            status: Number(
+                                /\bHTTP (\d{3})\b/.exec(detail)?.[1] ?? NaN
+                            ),
                         })
                     );
                     return;
                 }
-                let body;
-                try {
-                    body = JSON.parse(stdout);
-                } catch {
-                    reject(new Error("gh api returned invalid JSON"));
-                    return;
-                }
-                if (!Array.isArray(body?.jobs)) {
-                    reject(new Error("gh api returned no jobs list"));
-                    return;
-                }
-                resolve(body.jobs);
+                resolve(stdout);
             }
         );
     });
+
+const listJobs = async (repository, runId) => {
+    const stdout = await gh([
+        "api",
+        `repos/${repository}/actions/runs/${runId}/jobs?per_page=100`,
+    ]);
+    let body;
+    try {
+        body = JSON.parse(stdout);
+    } catch {
+        throw new Error("gh api returned invalid JSON");
+    }
+    if (!Array.isArray(body?.jobs)) {
+        throw new Error("gh api returned no jobs list");
+    }
+    return body.jobs;
+};
+
+/**
+ * Why a gh call that failed with `error` would fail again however often it
+ * were retried, or undefined when a retry may succeed: a network error, a
+ * timeout, HTTP 5xx or 429, or a 403 for a rate limit.
+ */
+const permanentFailure = (error, action, { repository, runId }) => {
+    if (error.code === "ENOENT") {
+        return "gh is not installed on this runner";
+    }
+    // gh exits with 4 when it has no token.
+    if (error.code === 4) {
+        return `${action} failed, gh has no token (${error.message}): the step needs GH_TOKEN`;
+    }
+    if (error.status === 401) {
+        return `${action} failed (${error.message}): GH_TOKEN is not a valid token`;
+    }
+    if (error.status === 403 && !/rate limit/i.test(error.output ?? "")) {
+        return `${action} was refused (${error.message}): the workflow's token needs the "actions: read" permission`;
+    }
+    if (error.status === 404) {
+        return `${action} found no run ${runId} in ${repository} (${error.message}): GITHUB_REPOSITORY and GITHUB_RUN_ID must name this run, and the workflow's token needs the "actions: read" permission`;
+    }
+    return undefined;
+};
 
 /**
  * The job of `machine`, or the names of the jobs that claim it when there
@@ -222,8 +266,13 @@ const main = async () => {
             }));
             lastError = undefined;
         } catch (error) {
-            if (error.code === "ENOENT") {
-                fail("gh is not installed on this runner");
+            const permanent = permanentFailure(
+                error,
+                "listing this run's jobs",
+                { repository, runId }
+            );
+            if (permanent) {
+                fail(permanent);
                 return;
             }
             lastError = error;

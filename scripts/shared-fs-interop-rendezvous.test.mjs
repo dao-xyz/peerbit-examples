@@ -15,7 +15,7 @@ const script = fileURLToPath(
 );
 
 // Call n gets response n (the last one repeats): response-<n>.json on
-// stdout, or error-<n>.txt on stderr with exit status 1.
+// stdout, or error-<n>.txt on stderr with exit status 1 (or exit-<n>.txt).
 const FAKE_GH = `#!/bin/sh
 dir="$FAKE_GH_DIR"
 n=$(cat "$dir/count" 2>/dev/null || echo 0)
@@ -25,7 +25,7 @@ last=$(cat "$dir/last")
 if [ "$n" -gt "$last" ]; then n=$last; fi
 if [ -f "$dir/error-$n.txt" ]; then
     cat "$dir/error-$n.txt" >&2
-    exit 1
+    exit "$(cat "$dir/exit-$n.txt" 2>/dev/null || echo 1)"
 fi
 cat "$dir/response-$n.json"
 `;
@@ -153,6 +153,12 @@ const rendezvous = async (t, responses, args = [], env = {}) => {
                 path.join(dir, `error-${index}.txt`),
                 `${response.error}\n`
             );
+            if (response.exitCode !== undefined) {
+                await writeFile(
+                    path.join(dir, `exit-${index}.txt`),
+                    String(response.exitCode)
+                );
+            }
         } else {
             await writeFile(
                 path.join(dir, `response-${index}.json`),
@@ -652,6 +658,78 @@ test("retries when listing the jobs fails", async (t) => {
         )
     );
 });
+
+test("retries rate limits, server and network errors", async (t) => {
+    const { code, lines, calls } = await rendezvous(t, [
+        {
+            error: "gh: API rate limit exceeded for installation ID 1234. (HTTP 403)",
+        },
+        {
+            error: "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+        },
+        { error: "gh: HTTP 429" },
+        { error: "gh: Server Error (HTTP 500)" },
+        {
+            error: "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+        },
+        [
+            plan(),
+            seed({ ready: true }),
+            joiner("macos", { ready: true }),
+            joiner("windows", { ready: true }),
+        ],
+    ]);
+    assert.equal(code, 0);
+    assert.equal(calls.length, 6);
+    assert.deepEqual(errors(lines), []);
+});
+
+// What gh prints (its first line) and its exit status when a listing can
+// never succeed, as gh 2.87.2 prints them.
+for (const { title, error, exitCode = 1, message } of [
+    {
+        title: "the token may not read the run's jobs (HTTP 403)",
+        error: "gh: Resource not accessible by integration (HTTP 403)",
+        message:
+            /::listing this run's jobs was refused \(gh: Resource not accessible by integration \(HTTP 403\)\): the workflow's token needs the "actions: read" permission$/,
+    },
+    {
+        title: "the run is not found (HTTP 404)",
+        error: "gh: Not Found (HTTP 404)",
+        message:
+            /::listing this run's jobs found no run 123 in dao-xyz\/peerbit-examples \(gh: Not Found \(HTTP 404\)\): GITHUB_REPOSITORY and GITHUB_RUN_ID must name this run, and the workflow's token needs the "actions: read" permission$/,
+    },
+    {
+        title: "the token is rejected (HTTP 401)",
+        error: "gh: Bad credentials (HTTP 401)",
+        message:
+            /::listing this run's jobs failed \(gh: Bad credentials \(HTTP 401\)\): GH_TOKEN is not a valid token$/,
+    },
+    {
+        title: "gh has no token",
+        error: "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable. Example:\n  env:\n    GH_TOKEN: ${{ github.token }}",
+        exitCode: 4,
+        message:
+            /::listing this run's jobs failed, gh has no token \(gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable\. Example:\): the step needs GH_TOKEN$/,
+    },
+]) {
+    test(`fails at once when ${title}`, async (t) => {
+        const { code, lines, calls } = await rendezvous(t, [
+            { error, exitCode },
+            [
+                plan(),
+                seed({ ready: true }),
+                joiner("macos", { ready: true }),
+                joiner("windows", { ready: true }),
+            ],
+        ]);
+        assert.equal(code, 1);
+        assert.equal(calls.length, 1, "no retry");
+        const [failure] = errors(lines);
+        assert.match(failure, /^::error title=Interop rendezvous \(linux\)::/);
+        assert.match(failure, message);
+    });
+}
 
 test("fails after the grace period when a peer has no job", async (t) => {
     const { code, lines, elapsedMs } = await rendezvous(t, [
