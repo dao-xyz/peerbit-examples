@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yargs from "yargs";
-import { hideBin } from "yargs/helpers";
+import { hideBin, Parser } from "yargs/helpers";
 import { mountExternalNativeAdapter } from "./external-native-adapter.js";
 import {
     describeNativeAdapterInstall,
@@ -1291,9 +1291,116 @@ const awaitConflictResolutionReady = async (
     }
 };
 
-export const runCli = async (args = hideBin(process.argv)) => {
-    installPeerbitRejectionGuard();
-    await yargs(args)
+/** What the refusal of a boolean flag given a value adds, by option. */
+const VALUED_BOOLEAN_HINTS = new Map([
+    ["persist-on-exit", "set the wait with --persist-timeout-ms"],
+]);
+
+/** yargs-parser's negative number: an argument it can take as a value. */
+const NEGATIVE_NUMBER = /^-([0-9]+(\.[0-9]+)?|\.[0-9]+)$/;
+
+/**
+ * The refusal of the first argument before `--` that gives a boolean option
+ * a value: yargs reads any value but true or false as false, so
+ * `conflicts --fail-if-any=1` turned its CI gate off. `booleans` maps each
+ * boolean option of the command to the aliases yargs parsed for it.
+ *
+ * yargs also reads names that are not a spelling of the option as the
+ * option, and keeps the value as given there. A <name> with a hyphen sets
+ * the camelCase of <name> (--fail-If-any=false and --fail-If-any false set
+ * failIfAny to "false", which reads as on): a spelling the option reaches
+ * only that way takes no value at all, with = or as the next argument. A
+ * dotted <name> sets the option its first segment names to an object, which
+ * reads as on (--assume-complete.x=0 and --no-assume-complete.x both turn
+ * the override on), so it is refused in every form. Nor does
+ * --no-<option>=<value>, which yargs does not read as the option, take a
+ * value. Where yargs takes the next argument as the value, the refusal
+ * quotes it too.
+ */
+const valuedBooleanFlagRefusal = (
+    args: readonly string[],
+    booleans: ReadonlyMap<string, readonly string[]>
+) => {
+    const spellings = new Map<string, string>();
+    for (const [option, aliases] of booleans) {
+        for (const spelling of [option, ...aliases]) {
+            spellings.set(spelling, option);
+        }
+    }
+    const owner = (name: string) =>
+        spellings.get(name) ??
+        (name.includes("-")
+            ? spellings.get(Parser.camelCase(name))
+            : undefined);
+    for (const [index, arg] of args.entries()) {
+        if (arg === "--") break;
+        const flag = /^--([^=]+)(=.*)?$/s.exec(arg);
+        if (!flag) continue;
+        const [, name, assignment] = flag;
+        const [head, ...fields] = name.split(".");
+        const negated = head.startsWith("no-");
+        const option =
+            owner(head) ?? (negated ? owner(head.slice(3)) : undefined);
+        if (option === undefined) continue;
+        // yargs takes the next argument as the value of a name that is not
+        // a spelling of the option, unless the name is negated or the
+        // argument starts with a hyphen and is not a negative number.
+        const next = args[index + 1];
+        const taken =
+            assignment === undefined &&
+            !negated &&
+            next !== undefined &&
+            (!next.startsWith("-") || NEGATIVE_NUMBER.test(next));
+        if (fields.length === 0) {
+            if (assignment === undefined) {
+                // A spelling or a negation reads as a boolean, and so does
+                // another name while yargs takes no value for it.
+                if (negated || spellings.has(name) || !taken) continue;
+            } else if (
+                spellings.has(name) &&
+                /^=(true|false)$/.test(assignment)
+            ) {
+                continue;
+            }
+        }
+        const hint = VALUED_BOOLEAN_HINTS.get(option);
+        const given = taken ? `${arg} ${next}` : arg;
+        return `${given}: --${head} takes no value${hint ? `; ${hint}` : ""}`;
+    }
+    return undefined;
+};
+
+/**
+ * Before validation, for the command being parsed: a refusal becomes the
+ * parse error, which yargs reports as a usage error (the command's usage,
+ * then the message; exit 1) before strict mode calls --no-<option>=<value>
+ * an unknown argument.
+ */
+const refuseValuedBooleanFlags = (
+    parser: yargs.Argv,
+    args: readonly string[]
+) => {
+    // Not in @types/yargs: the options of the command being parsed.
+    const { boolean } = (
+        parser as unknown as { getOptions(): { boolean: string[] } }
+    ).getOptions();
+    const aliases = parser.parsed ? parser.parsed.aliases : {};
+    const refusal = valuedBooleanFlagRefusal(
+        args,
+        new Map(boolean.map((option) => [option, aliases[option] ?? []]))
+    );
+    if (refusal === undefined) return;
+    if (!parser.parsed) throw new Error(refusal);
+    parser.parsed.error = new Error(refusal);
+};
+
+/**
+ * peerbit-fs's parser for `args`, with every command and option. Parse it
+ * without arguments: its boolean flag check reads `args`.
+ */
+export const createCliParser = (args: string[]) => {
+    const parser = yargs(args);
+    return parser
         .scriptName("peerbit-fs")
         .option("directory", {
             alias: "d",
@@ -1622,15 +1729,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     argv.persistTimeoutMs,
                     "--persist-timeout-ms"
                 );
-                // yargs reads --persist-on-exit=30000 as false.
-                const valued = args.find((arg) =>
-                    /^--persist-on-exit=(?!(true|false)$)/.test(arg)
-                );
-                if (valued) {
-                    throw new Error(
-                        `${valued}: --persist-on-exit takes no value; set the wait with --persist-timeout-ms`
-                    );
-                }
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
@@ -2900,6 +2998,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
         )
         .demandCommand(1)
         .strict()
-        .help()
-        .parseAsync();
+        .middleware(() => refuseValuedBooleanFlags(parser, args), true)
+        .help();
+};
+
+export const runCli = async (args = hideBin(process.argv)) => {
+    installPeerbitRejectionGuard();
+    await createCliParser(args).parseAsync();
 };

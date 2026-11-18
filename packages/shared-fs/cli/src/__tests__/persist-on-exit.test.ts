@@ -506,19 +506,29 @@ describe("mount shutdown requests", () => {
                 `--persist-timeout-ms must be an integer from 1 to 2147483647 (milliseconds); got ${got}`
             );
         }
-        // yargs would read it as --no-persist-on-exit.
-        await expect(
-            runCli([
-                "mount",
-                "zb2rh-not-opened",
-                "/tmp/peerbit-shared-fs-not-mounted",
-                "--persist-on-exit=30000",
-                "--directory",
-                "",
-            ])
-        ).rejects.toThrow(
-            "--persist-on-exit=30000: --persist-on-exit takes no value; set the wait with --persist-timeout-ms"
-        );
+        // yargs would read it as --no-persist-on-exit: a usage error instead,
+        // the command's usage and then the refusal.
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+        for (const flag of ["--persist-on-exit", "--persistOnExit"]) {
+            error.mockClear();
+            await expect(
+                runCli([
+                    "mount",
+                    "zb2rh-not-opened",
+                    "/tmp/peerbit-shared-fs-not-mounted",
+                    `${flag}=30000`,
+                    "--directory",
+                    "",
+                ])
+            ).rejects.toBeInstanceOf(Error);
+            const output = error.mock.calls.map((call) => call.join(" "));
+            expect(output[0]).toMatch(
+                /^peerbit-fs mount <address> <mountpoint>\n/
+            );
+            expect(output.at(-1)).toBe(
+                `${flag}=30000: ${flag} takes no value; set the wait with --persist-timeout-ms`
+            );
+        }
         expect(create).not.toHaveBeenCalled();
     });
 });

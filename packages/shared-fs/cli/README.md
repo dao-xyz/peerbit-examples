@@ -31,6 +31,13 @@ peerbit-fs unmount <mountpoint>
 peerbit-fs prepare-disposal <address>
 ```
 
+A boolean option takes no value: `--fail-if-any` turns it on and
+`--no-fail-if-any` off. `--fail-if-any=true` and `--fail-if-any=false` work
+too, but any other value, such as `--fail-if-any=1`, is refused as a usage
+error (exit 1) instead of being read as false. A dotted name, such as
+`--assume-complete.x=0`, is refused the same way instead of turning the
+option on.
+
 `benchmark` writes and reads one large file plus a configurable many-small-files
 workload. It is a baseline for tracking regressions, not a claim that v0 is
 optimized for code workspaces. It generates a fresh byte corpus by default and
