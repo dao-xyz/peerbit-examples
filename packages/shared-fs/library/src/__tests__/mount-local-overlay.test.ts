@@ -417,8 +417,20 @@ describe("mount local overlay", () => {
 
     it("publishes nothing from local paths", async () => {
         const { backend } = await mount();
+        // The store the filesystem's log writes its blocks to (not the
+        // peer's block service), and the local store under it.
+        const logBlocks = fs.program.entries.log.log.blocks as any;
+        const blockWrites = [logBlocks, logBlocks.localStore].flatMap((store) =>
+            ["put", "putMany", "putKnown", "putKnownMany"]
+                .filter((method) => typeof store?.[method] === "function")
+                .map((method) => vi.spyOn(store, method))
+        );
+        const blocksWritten = () =>
+            blockWrites.reduce((sum, spy) => sum + spy.mock.calls.length, 0);
         await writeThrough(backend, "/shared.txt", "shared");
         await backend.mkdir("/nested");
+        // Control: the spies see a shared change's blocks.
+        expect(blocksWritten()).toBeGreaterThan(0);
         const state = async () => ({
             logHashes: (await fs.program.entries.log.log.toArray())
                 .map((entry) => entry.hash)
@@ -428,10 +440,10 @@ describe("mount local overlay", () => {
             conflicts: await backend.readdir(`/${CONFLICTS_DIR}`),
         });
         const before = await state();
-        const put = vi.spyOn(peer.services.blocks as any, "put");
+        for (const spy of blockWrites) spy.mockClear();
         await localWorkload(backend);
         await localWorkload(backend, "/nested");
-        expect(put).not.toHaveBeenCalled();
+        expect(blocksWritten()).toBe(0);
         expect(await state()).toEqual(before);
         expect([...before.listing].sort()).toEqual(["nested", "shared.txt"]);
     });
