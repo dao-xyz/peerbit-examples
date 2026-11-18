@@ -314,13 +314,14 @@ each sub-phase's share of the target write. Kernel scheduling and cache time,
 remote readability, replication, and persisted acknowledgements are not
 reported.
 
-On Windows PowerShell:
+On Windows PowerShell, mount at a free drive letter, or at a directory that
+does not exist yet (WinFsp creates it, and refuses one that exists). `Mounted`
+is printed once a drive letter exists; a directory can appear just after it.
 
 ```powershell
 peerbit-fs status
 $address = peerbit-fs create
-New-Item -ItemType Directory -Force "$env:USERPROFILE\PeerbitShared"
-peerbit-fs mount $address "$env:USERPROFILE\PeerbitShared"
+peerbit-fs mount $address P:
 ```
 
 Authentication is on by default. Use `peerbit-fs create --no-auth` only for
