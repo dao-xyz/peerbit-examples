@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import {
+    chmod,
     lstat,
     mkdir,
     mkdtemp,
     readFile,
     readdir,
     rm,
+    stat,
+    symlink,
     writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -746,7 +749,7 @@ describe("mount local overlay", () => {
         expect(localLinkTargetError("/abs", "linux")).toBeUndefined();
     });
 
-    it.skipIf(!canSymlink)("never follows a host symlink", async () => {
+    it.skipIf(!canSymlink)("never follows a final host symlink", async () => {
         const { backend } = await mount();
         await backend.mkdir("/node_modules");
         await writeThrough(backend, "/node_modules/target.txt", "target");
@@ -784,6 +787,136 @@ describe("mount local overlay", () => {
             "target"
         );
     });
+
+    it.skipIf(!canSymlink)(
+        "never passes through a host symlink, so nothing outside the overlay is reached",
+        async () => {
+            const { backend } = await mount();
+            // Outside the overlay, next to it in the test's directory.
+            const outside = join(temp, "outside");
+            await mkdir(join(outside, "sub"), { recursive: true });
+            await writeFile(join(outside, "secret.txt"), "secret");
+            await chmod(join(outside, "secret.txt"), 0o600);
+            const outsideState = async () => ({
+                names: (await readdir(outside)).sort(),
+                sub: await readdir(join(outside, "sub")),
+                secret: await readFile(join(outside, "secret.txt"), "utf8"),
+                mode: (await stat(join(outside, "secret.txt"))).mode & 0o777,
+            });
+            const before = await outsideState();
+
+            await backend.mkdir("/node_modules");
+            await writeThrough(backend, "/node_modules/inside.txt", "inside");
+            // <overlay>/n/<root>/node_modules/up climbs to the test directory.
+            await backend.symlink("../../../../outside", "/node_modules/up");
+            const links = ["/node_modules/up"];
+            if (process.platform !== "win32") {
+                await backend.symlink(outside, "/node_modules/abs");
+                links.push("/node_modules/abs");
+            }
+            // A boundary that is itself a link, in a shared directory.
+            await backend.mkdir("/q");
+            await backend.symlink("../../../outside", "/q/node_modules");
+            links.push("/q/node_modules");
+
+            const refused = { code: "ENOTDIR" };
+            for (const link of links) {
+                const secret = `${link}/secret.txt`;
+                await expect(backend.readdir(link), link).rejects.toMatchObject(
+                    refused
+                );
+                const attempts: Array<[string, () => Promise<unknown>]> = [
+                    ["getattr", () => backend.getattr(secret)],
+                    ["read", () => backend.open(secret, { read: true })],
+                    [
+                        "create",
+                        () =>
+                            backend.open(`${link}/planted.txt`, {
+                                write: true,
+                                create: true,
+                            }),
+                    ],
+                    ["chmod", () => backend.setattr(secret, { mode: 0o777 })],
+                    ["utimens", () => backend.setattr(secret, { mtimeMs: 1 })],
+                    ["truncate", () => backend.truncate(secret, 0)],
+                    ["readlink", () => backend.readlink(secret)],
+                    ["unlink", () => backend.unlink(secret)],
+                    [
+                        "rename out",
+                        () =>
+                            backend.rename(secret, "/node_modules/stolen.txt"),
+                    ],
+                    [
+                        "rename in",
+                        () =>
+                            backend.rename(
+                                "/node_modules/inside.txt",
+                                `${link}/inside.txt`
+                            ),
+                    ],
+                    ["mkdir", () => backend.mkdir(`${link}/made`)],
+                    ["rmdir", () => backend.rmdir(`${link}/sub`)],
+                    ["symlink", () => backend.symlink("x", `${link}/made`)],
+                ];
+                for (const [label, attempt] of attempts) {
+                    await expect(
+                        attempt(),
+                        `${label} through ${link}`
+                    ).rejects.toMatchObject(refused);
+                }
+            }
+            expect(await outsideState()).toEqual(before);
+            expect(await readThrough(backend, "/node_modules/inside.txt")).toBe(
+                "inside"
+            );
+
+            // A directory checked once, then replaced by a link through the
+            // mount, is checked again: after rmdir and after rename.
+            await backend.mkdir("/node_modules/d");
+            await writeThrough(backend, "/node_modules/d/f.txt", "f");
+            await backend.unlink("/node_modules/d/f.txt");
+            await backend.rmdir("/node_modules/d");
+            await backend.symlink("../../../../outside", "/node_modules/d");
+            await expect(
+                backend.getattr("/node_modules/d/secret.txt")
+            ).rejects.toMatchObject(refused);
+            await backend.mkdir("/node_modules/e");
+            await writeThrough(backend, "/node_modules/e/f.txt", "f");
+            await backend.rename("/node_modules/e", "/node_modules/e2");
+            await backend.symlink("../../../../outside", "/node_modules/e");
+            await expect(
+                backend.open("/node_modules/e/secret.txt", { read: true })
+            ).rejects.toMatchObject(refused);
+            expect(await readThrough(backend, "/node_modules/e2/f.txt")).toBe(
+                "f"
+            );
+            expect(await outsideState()).toEqual(before);
+        }
+    );
+
+    it.skipIf(!canSymlink)(
+        "never takes a link in its attachment list for an attachment",
+        async () => {
+            // Another filesystem's tree, linked in as the root's attachment.
+            const elsewhere = join(temp, "elsewhere");
+            await mkdir(join(elsewhere, "node_modules"), { recursive: true });
+            await writeFile(join(elsewhere, "node_modules", "x.js"), "x");
+            await mkdir(join(overlayDir, "n"), { recursive: true });
+            await writeFile(
+                join(overlayDir, "meta.json"),
+                JSON.stringify({ format: 1, address: fs.address })
+            );
+            await symlink(elsewhere, join(overlayDir, "n", ROOT_KEY), "dir");
+            const { backend } = await mount();
+            expect(await names(backend, "/")).toEqual([]);
+            await expect(
+                backend.getattr("/node_modules/x.js")
+            ).rejects.toMatchObject({ code: "ENOENT" });
+            expect(
+                await readFile(join(elsewhere, "node_modules", "x.js"), "utf8")
+            ).toBe("x");
+        }
+    );
 
     it("keeps an open handle on its side when the ignore rules change", async () => {
         const ignoring = await openIgnoring({});

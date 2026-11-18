@@ -37,6 +37,8 @@ import {
 const LOCAL_OVERLAY_FORMAT = 1;
 /** Anchor paths whose node id is remembered while the namespace is quiet. */
 const ANCHOR_CACHE_LIMIT = 4096;
+/** Host directories known to be directories, not links, until a change. */
+const DIRECTORY_CACHE_LIMIT = 8192;
 /** Host lstat calls in flight for one listing. */
 const LISTING_STAT_CONCURRENCY = 16;
 
@@ -297,6 +299,12 @@ class MountLocalOverlay implements SharedFsMountLocalOverlay {
     private readonly anchorIds = new Map<string, string>();
     /** Advanced on every anchor cache clear: a lookup older than it is not cached. */
     private anchorGeneration = 0;
+    /**
+     * Host paths found to be directories (lstat, so not links), forgotten
+     * on every local rename and rmdir: only those can turn one into
+     * something else.
+     */
+    private readonly directories = new Set<string>();
     private readonly logged = new Set<string>();
 
     constructor(
@@ -442,10 +450,17 @@ class MountLocalOverlay implements SharedFsMountLocalOverlay {
         return path;
     }
 
-    private async lookup(route: LocalRoute) {
+    /**
+     * The host path of an existing entry: every directory above it, and
+     * with `directory` the entry itself, must be a host directory (see
+     * throughDirectories).
+     */
+    private async lookup(route: LocalRoute, directory = false) {
         const nodeId = await this.anchorNodeId(route.anchorPath);
         if (!this.attachments.has(nodeId)) throw notFound(route.path);
-        return { nodeId, path: this.hostPath(route, nodeId, false) };
+        const path = this.hostPath(route, nodeId, false);
+        await this.throughDirectories(route, nodeId, directory);
+        return { nodeId, path };
     }
 
     /** Resolve `route` for a create: its attachment exists afterwards. */
@@ -466,7 +481,51 @@ class MountLocalOverlay implements SharedFsMountLocalOverlay {
                 `Parent directory does not exist: ${dirname(route.path)}`
             );
         }
+        await this.throughDirectories(route, nodeId, false);
         return { nodeId, path };
+    }
+
+    /**
+     * ENOTDIR unless every host directory from the attachment down to
+     * `route`'s parent, and `route` itself with `self`, is a directory and
+     * not a link to one (ENOENT for a missing one). The overlay never
+     * follows a host link, so no path reaches outside it through one, also
+     * not a stale path a kernel sends after another writer's rename. It
+     * checks, then acts: a concurrent local change in between is not
+     * covered.
+     */
+    private async throughDirectories(
+        route: LocalRoute,
+        nodeId: string,
+        self: boolean
+    ) {
+        const names = [route.boundary, ...route.rest];
+        const attachment = join(this.nodesRoot, hexOf(nodeId));
+        const count = self ? names.length + 1 : names.length;
+        for (let depth = 0; depth < count; depth++) {
+            const directory = join(attachment, ...names.slice(0, depth));
+            if (this.directories.has(directory)) continue;
+            const stats = await this.onHost("lstat", route.path, () =>
+                host.lstat(directory)
+            );
+            if (!stats.isDirectory()) {
+                throw new SharedFsBackendError(
+                    "ENOTDIR",
+                    `Not a directory on this machine: ${joinFsPath(
+                        route.anchorPath,
+                        ...names.slice(0, depth)
+                    )}`
+                );
+            }
+            this.rememberDirectory(directory);
+        }
+    }
+
+    private rememberDirectory(path: string) {
+        if (this.directories.size >= DIRECTORY_CACHE_LIMIT) {
+            this.directories.clear();
+        }
+        this.directories.add(path);
     }
 
     /** After a change of the anchor's own entries: its mtime moves. */
@@ -625,7 +684,8 @@ class MountLocalOverlay implements SharedFsMountLocalOverlay {
     }
 
     async readdir(route: LocalRoute, includeStats: boolean) {
-        const { path } = await this.lookup(route);
+        // A link is never listed through: ENOTDIR, as for any non-directory.
+        const { path } = await this.lookup(route, true);
         return this.listHost(path, route.path, includeStats);
     }
 
@@ -924,12 +984,15 @@ class MountLocalOverlay implements SharedFsMountLocalOverlay {
     async mkdir(route: LocalRoute) {
         const { nodeId, path } = await this.creating(route);
         await this.onHost("mkdir", route.path, () => host.mkdir(path));
+        this.rememberDirectory(path);
         this.changedAnchor(route, nodeId);
     }
 
     async rmdir(route: LocalRoute) {
         const { nodeId, path } = await this.lookup(route);
         await this.onHost("rmdir", route.path, () => host.rmdir(path));
+        // Something else may take its name: check again.
+        this.directories.clear();
         this.changedAnchor(route, nodeId);
     }
 
@@ -945,6 +1008,8 @@ class MountLocalOverlay implements SharedFsMountLocalOverlay {
         await this.onHost("rename", from.path, () =>
             host.rename(source.path, destination.path)
         );
+        // A moved or replaced directory: check again.
+        this.directories.clear();
         this.changedAnchor(from, source.nodeId);
         this.changedAnchor(to, destination.nodeId);
     }
@@ -1202,16 +1267,19 @@ export const openMountLocalOverlay = async (
     const nodesRoot = join(directory, "n");
     await opened(() => host.mkdir(nodesRoot, { recursive: true, mode: 0o700 }));
     const attachments = new Set<string>();
-    const names = await opened(() => host.readdir(nodesRoot));
-    for (const name of names) {
-        const nodeId = attachmentNodeId(name);
-        if (nodeId === undefined) continue;
-        const attachment = join(nodesRoot, name);
+    const listed = await opened(() =>
+        host.readdir(nodesRoot, { withFileTypes: true })
+    );
+    for (const dirent of listed) {
+        const nodeId = attachmentNodeId(dirent.name);
+        // A file or a link (never followed) is no attachment.
+        if (nodeId === undefined || !dirent.isDirectory()) continue;
+        const attachment = join(nodesRoot, dirent.name);
         let held: string[];
         try {
             held = await host.readdir(attachment);
         } catch {
-            continue; // not a directory
+            continue; // gone since the listing
         }
         if (held.length === 0) {
             // Holds no data: the only removal the overlay makes itself.

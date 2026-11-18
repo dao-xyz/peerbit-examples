@@ -1559,6 +1559,9 @@ in `/.peerbit-conflicts`, and none of it reaches another replica.
   renamed over (`ENOTEMPTY`) until they are gone.
 - Paths are classified at every lookup, so an ignore rule change applies to
   the next one; an open descriptor stays on the side it was opened on.
+- The overlay never follows a symlink on the host: a mount resolves links
+  through `readlink`, and a path that passes through a link, or a `readdir`
+  of one, fails with `ENOTDIR`, so nothing outside the directory is reached.
 - Names created below a boundary follow the shared naming rules (255 bytes,
   no control characters, no `\`); below the boundary, names follow the
   host's case rules, so they are case-insensitive on default macOS and
