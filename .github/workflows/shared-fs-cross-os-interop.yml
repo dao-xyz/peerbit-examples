@@ -28,6 +28,7 @@ on:
             - "vitest.setup.ts"
             - "packages/shared-fs/**"
             - "scripts/shared-fs-interop-rendezvous*.mjs"
+            - "scripts/shared-fs-interop-seed-steps.test.mjs"
     workflow_dispatch:
         inputs:
             timeout_minutes:
@@ -145,11 +146,17 @@ jobs:
             - name: Checkout
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
               with:
-                  sparse-checkout: scripts
+                  sparse-checkout: |
+                      .github/workflows
+                      scripts
 
             - name: Test rendezvous script
               timeout-minutes: 5
               run: node --test scripts/shared-fs-interop-rendezvous.test.mjs
+
+            - name: Test seed steps
+              timeout-minutes: 5
+              run: node --test scripts/shared-fs-interop-seed-steps.test.mjs
 
     seed-linux:
         name: Seed peer (linux)
@@ -204,6 +211,9 @@ jobs:
                   mkdir -p shared-fs-address interop-logs
                   timeout_ms=$((INTEROP_TIMEOUT_MINUTES * 60 * 1000))
                   (
+                    # Without set +e, a nonzero exit from node ends this
+                    # subshell before it records the status.
+                    set +e
                     node packages/shared-fs/cli/lib/esm/cross-os-interop.js \
                       --role seed \
                       --machine linux \
@@ -212,7 +222,9 @@ jobs:
                       --timeout-ms "$timeout_ms" \
                       --directory .peerbit-shared-fs-interop-linux \
                       > interop-logs/linux-seed.log 2>&1
-                    echo "$?" > interop-logs/linux-seed.exit
+                    status="$?"
+                    echo "$status" > interop-logs/linux-seed.exit
+                    exit "$status"
                   ) &
                   echo "$!" > interop-logs/linux-seed.pid
 
