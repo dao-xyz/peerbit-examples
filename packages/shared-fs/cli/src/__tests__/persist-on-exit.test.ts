@@ -192,6 +192,10 @@ describe("mount shutdown requests", () => {
     const settle = () => new Promise((resolve) => setImmediate(resolve));
 
     it("stops when the mount ends on its own (its adapter exited) as on a first request, and not again during a stop under way", async () => {
+        const lines: string[] = [];
+        vi.spyOn(console, "error").mockImplementation((...args) => {
+            lines.push(args.join(" "));
+        });
         let adapterExited!: () => void;
         const host = fakeHost();
         const stop = pendingStop(
@@ -216,7 +220,8 @@ describe("mount shutdown requests", () => {
         expect(stop.stops).toBe(1);
 
         // An exit reported while a stop runs (the adapter died just before
-        // the request) is not a second request.
+        // the request) is not a second request, nor a copy of the first: its
+        // report can come a second later, after the adapter's stderr closed.
         let lateExit!: () => void;
         const busyHost = fakeHost();
         const busy = pendingStop(
@@ -226,12 +231,14 @@ describe("mount shutdown requests", () => {
         );
         busyHost.emit("SIGTERM");
         expect(busy.stops).toBe(1);
+        busyHost.ms += 1_000;
         lateExit();
         await settle();
         expect(busy.stops).toBe(1);
         expect(busyHost.exit).not.toHaveBeenCalled();
         busy.release();
         await busy.stopped;
+        expect(lines).toEqual([]);
     });
 
     it("keeps an adapter failure's 70 over 75 and 130, and a failed step's 1 over 70", async () => {
