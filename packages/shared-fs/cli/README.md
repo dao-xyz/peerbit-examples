@@ -726,12 +726,12 @@ Each request also carries a random 256-bit token that `mount` writes, with its
 pid, the endpoint and the state directory's device and inode numbers, to
 `<directory>/mount-control.json`: mode 0600 on Linux and macOS; on Windows
 the state directory's own permissions apply. The mount compares the token in
-constant time and refuses a request without it. A command reads that file
-only if it is a regular file of its own user that no one else may read, and
-connects only to a socket whose directory is its own user's and closed to
-others. The file counts only in the directory it was written for: a copy in
-another directory names no mount there. A request is one line of JSON per
-connection, with a protocol version, of at most 1 MiB, which must arrive
+constant time and refuses a request without it. On Linux and macOS, a command
+reads that file only if it is a regular file of its own user that no one else
+may read, and connects only to a socket whose directory is its own user's and
+closed to others. The file counts only in the directory it was written for: a
+copy in another directory names no mount there. A request is one line of JSON
+per connection, with a protocol version, of at most 1 MiB, which must arrive
 within 30 s of connecting; the mount closes a connection that sends more or
 takes longer, and refuses another protocol version or another peerbit-fs
 version.
