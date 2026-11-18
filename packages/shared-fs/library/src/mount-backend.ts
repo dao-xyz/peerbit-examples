@@ -914,11 +914,49 @@ const directoryHoldsLocalEntries = (path: string) =>
 const badHandle = (handle: number) =>
     new SharedFsBackendError("EBADF", `Unknown file handle: ${handle}`);
 
-/** A host ENOSPC or EDQUOT on `error` or its `cause`, else undefined. */
+/**
+ * How the store under Node (LevelDB, through classic-level) words a full
+ * disk or an exhausted quota. Its LEVEL_IO_ERROR carries no errno, only
+ * "IO error: <file>: <text>", where the text is strerror's on Linux (glibc or
+ * musl) and macOS and FormatMessage's on Windows, in the system's language:
+ * these are the English texts, so another language stays EIO.
+ */
+const LEVEL_STORAGE_TEXTS: ReadonlyArray<
+    readonly [RegExp, "ENOSPC" | "EDQUOT"]
+> = [
+    [/: No space left on device$/, "ENOSPC"],
+    // glibc "Disk quota exceeded", macOS "Disc quota exceeded", musl "Quota exceeded"
+    [/: (?:Dis[ck] quota|Quota) exceeded$/, "EDQUOT"],
+    // Windows ERROR_DISK_FULL and ERROR_HANDLE_DISK_FULL
+    [
+        /: (?:There is not enough space on the disk|The disk is full)\.?$/,
+        "ENOSPC",
+    ],
+];
+
+/**
+ * ENOSPC or EDQUOT when `error`, or an error in its `cause` chain, reports a
+ * full disk or an exhausted quota: Node's own code, SQLite's SQLITE_FULL, or
+ * the operating system's text in a LevelDB IO error. Else undefined.
+ */
 const hostStorageCode = (error: unknown) => {
-    for (const candidate of [error, (error as { cause?: unknown })?.cause]) {
-        const code = (candidate as { code?: unknown } | undefined)?.code;
+    let candidate = error;
+    for (let depth = 0; depth < 8; depth++) {
+        if (typeof candidate !== "object" || candidate === null) break;
+        const { code, message, cause } = candidate as {
+            code?: unknown;
+            message?: unknown;
+            cause?: unknown;
+        };
         if (code === "ENOSPC" || code === "EDQUOT") return code;
+        if (code === "SQLITE_FULL") return "ENOSPC";
+        if (code === "LEVEL_IO_ERROR" && typeof message === "string") {
+            const text = message.trimEnd();
+            for (const [pattern, storageCode] of LEVEL_STORAGE_TEXTS) {
+                if (pattern.test(text)) return storageCode;
+            }
+        }
+        candidate = cause;
     }
     return undefined;
 };
@@ -944,8 +982,8 @@ const toBackendError = (error: unknown): SharedFsBackendError => {
                   : error.code;
         return new SharedFsBackendError(code, error.message);
     }
-    // Any other error: a host ENOSPC or EDQUOT (on the error or its `cause`)
-    // under the store is reported as such; everything else stays EIO.
+    // Any other error: a full disk or an exhausted quota under the store
+    // (see hostStorageCode) is reported as such; everything else stays EIO.
     return new SharedFsBackendError(
         hostStorageCode(error) ?? "EIO",
         error instanceof Error ? error.message : String(error)

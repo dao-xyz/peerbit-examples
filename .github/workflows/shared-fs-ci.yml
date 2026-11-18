@@ -106,7 +106,16 @@ jobs:
               id: diagnostics
               run: node --test scripts/shared-fs-strict-tests/regression.test.mjs scripts/shared-fs-strict-tests/error-evidence.test.mjs
 
+            - name: Mount a small disk for the full-store test
+              if: runner.os == 'Linux'
+              run: |
+                  mkdir -p "$RUNNER_TEMP/shared-fs-small-disk"
+                  sudo mount -t tmpfs -o size=64m,mode=1777 shared-fs-small-disk "$RUNNER_TEMP/shared-fs-small-disk"
+
             - name: Test shared-fs library (strict first-attempt gate)
+              env:
+                  # The test that fills a store's disk runs where this is set.
+                  SHARED_FS_TEST_SMALL_DISK: ${{ runner.os == 'Linux' && format('{0}/shared-fs-small-disk', runner.temp) || '' }}
               run: pnpm --filter @peerbit/shared-fs exec vitest run --config ../../../scripts/shared-fs-strict-tests/vitest.config.mjs --retry=0
 
             - name: Test shared-fs CLI (strict first-attempt gate)

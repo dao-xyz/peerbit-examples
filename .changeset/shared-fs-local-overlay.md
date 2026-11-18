@@ -17,5 +17,6 @@ directory holding local entries cannot be removed or replaced (`ENOTEMPTY`).
 The mount backend gains the error codes `EXDEV`, `ENOSPC`, `EPERM` and
 `EDQUOT`: a rename across an ignore boundary now fails with `EXDEV` instead
 of `EACCES`, and a full or over-quota disk under the store reports `ENOSPC`
-or `EDQUOT` instead of `EIO`. Without `localOverlay` a mount is otherwise
-unchanged. No wire or shared storage format changes.
+or `EDQUOT` instead of `EIO` (told from the store's error, on Windows in
+English only). Without `localOverlay` a mount is otherwise unchanged. No wire
+or shared storage format changes.

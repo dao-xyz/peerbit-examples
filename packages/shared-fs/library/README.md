@@ -1593,7 +1593,12 @@ The mount backend's error codes include `EXDEV`, `ENOSPC`, `EPERM` and
 `EDQUOT`, with or without a local overlay: a rename across an ignore
 boundary fails with `EXDEV` (it used to be `EACCES`), and a full or
 over-quota disk under the store reports `ENOSPC` or `EDQUOT` instead of
-`EIO`.
+`EIO`. The backend tells those from the target's error: a Node `code`
+(also on a `cause`), SQLite's `SQLITE_FULL`, or the operating system's text
+in a LevelDB `LEVEL_IO_ERROR`, which carries no errno and is worded in the
+system's language on Windows (recognised in English only; otherwise `EIO`).
+Once its disk has filled, LevelDB refuses every write until the store is
+opened again, even after space is freed.
 
 ### Opt-in mounted-path profiling
 

@@ -503,6 +503,13 @@ deleting. On Windows `EACCES` also becomes `STATUS_ACCESS_DENIED`, so Node
 reports `EPERM` for both. An adapter built before these names existed reports
 them as `EIO`.
 
+The daemon tells a full disk or an exhausted quota under its store from the
+store's own error, which on Windows is worded in the system's language: there
+it is recognised in English only, and in another language the failure stays
+`EIO` (the adapter then prints the store's message). Once its disk has filled,
+the store refuses every write until the mount restarts, even after space is
+freed: free space, then stop the mount and mount again.
+
 ## Kernel caching and other peers' changes
 
 The adapter keeps no cache of its own. What the kernel caches decides how
