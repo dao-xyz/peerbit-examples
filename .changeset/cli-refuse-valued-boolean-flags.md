@@ -12,7 +12,9 @@ now gives a usage error before the command runs: the command's usage, then
 one line naming the flag, such as
 `--fail-if-any=1: --fail-if-any takes no value`, and exit 1.
 `--no-<flag>=<value>`, already refused as an unknown argument, gets the same
-line, and `--persist-on-exit=<value>` keeps its hint to set the wait with
+line. So does a dotted name in any form, such as
+`mount --assume-complete.x=0` or `--no-assume-complete.x`, which turned the
+override on. `--persist-on-exit=<value>` keeps its hint to set the wait with
 `--persist-timeout-ms`. `--fail-if-any`, `--no-fail-if-any`,
 `--fail-if-any=true` and `--fail-if-any=false` work as before, other options
 keep their values, and arguments after `--` are not read.

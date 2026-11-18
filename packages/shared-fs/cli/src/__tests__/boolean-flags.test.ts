@@ -4,9 +4,11 @@ import { createCliParser } from "../index.js";
 /**
  * A boolean option given a value. yargs read every value but true or false
  * as false: `conflicts --fail-if-any=1` turned the CI gate off and
- * `mount --persistOnExit=30000` skipped the shutdown wait. The table covers
- * every boolean option of every command, as yargs knows them for the command
- * being parsed, in each spelling yargs reads as the option.
+ * `mount --persistOnExit=30000` skipped the shutdown wait. A dotted name made
+ * the option an object, which reads as on: `mount --assume-complete.x=0`
+ * turned the override on. The table covers every boolean option of every
+ * command, as yargs knows them for the command being parsed, in each
+ * spelling yargs reads as the option.
  */
 
 const STOP = new Error("stopped before the command handler");
@@ -154,22 +156,36 @@ const tableOf = (command: Command) => {
     for (const option of command.options.boolean) {
         const spellings = [option, ...(command.aliases[option] ?? [])];
         const hint = HINTS[option] ?? "";
-        // The keys are read only where the command would run instead.
-        const refused = (flag: string, value: string) =>
+        // yargs' own --help and --version print and exit 0 when set.
+        const shows = option === "help" || option === "version";
+        // `given`, refused as `quoted: flag takes no value`. The keys are
+        // read only where the command would run instead.
+        const refusedAs = (given: string[], quoted: string, flag: string) =>
             rows.push({
-                args: [...base, `${flag}=${value}`],
+                args: [...base, ...given],
                 keys: spellings,
                 outcome: {
-                    refused: `${flag}=${value}: ${flag} takes no value${hint}`,
+                    refused: `${quoted}: ${flag} takes no value${hint}`,
                 },
             });
-        const accepted = (arg: string, value: boolean) =>
+        const refused = (flag: string, value: string) =>
+            refusedAs([`${flag}=${value}`], `${flag}=${value}`, flag);
+        // `given` with a dotted name: yargs made the option an object, which
+        // reads as on (so help or the version prints for those two).
+        const dotted = (given: string[], quoted: string, flag: string) =>
+            shows
+                ? rows.push({
+                      args: [...base, ...given],
+                      keys: spellings,
+                      outcome: { exit: 0 },
+                  })
+                : refusedAs(given, quoted, flag);
+        const accepted = (given: string[], value: boolean) =>
             rows.push({
-                args: [...base, arg],
+                args: [...base, ...given],
                 keys: spellings,
-                // yargs' own --help and --version print and exit 0.
                 outcome:
-                    value && (option === "help" || option === "version")
+                    value && shows
                         ? { exit: 0 }
                         : {
                               argv: Object.fromEntries(
@@ -181,18 +197,39 @@ const tableOf = (command: Command) => {
             for (const value of REFUSED) {
                 refused(`--${spelling}`, value);
             }
-            accepted(`--${spelling}=true`, true);
-            accepted(`--${spelling}=false`, false);
-            accepted(`--${spelling}`, true);
-            accepted(`--no-${spelling}`, false);
+            accepted([`--${spelling}=true`], true);
+            accepted([`--${spelling}=false`], false);
+            accepted([`--${spelling}`], true);
+            accepted([`--no-${spelling}`], false);
+            accepted([`--${spelling}`, "true"], true);
+            accepted([`--${spelling}`, "false"], false);
             for (const value of [...REFUSED, "true", "false"]) {
                 refused(`--no-${spelling}`, value);
             }
+            const flag = `--${spelling}`;
+            for (const value of [...REFUSED, "true", "false"]) {
+                dotted([`${flag}.x=${value}`], `${flag}.x=${value}`, flag);
+            }
+            dotted([`${flag}.=0`], `${flag}.=0`, flag);
+            dotted([`${flag}.x`], `${flag}.x`, flag);
+            // yargs takes the next argument as the dotted name's value,
+            // unless it starts with a hyphen and is not a negative number.
+            dotted([`${flag}.x`, "0"], `${flag}.x 0`, flag);
+            dotted([`${flag}.x`, "-1"], `${flag}.x -1`, flag);
+            dotted([`${flag}.x`, "--"], `${flag}.x`, flag);
+            const negated = `--no-${spelling}`;
+            dotted([`${negated}.x`], `${negated}.x`, negated);
+            dotted([`${negated}.x`, "0"], `${negated}.x`, negated);
+            // With =, yargs sets an unknown no-<name> instead of the option,
+            // so help and the version do not print: refused for them too.
+            refusedAs([`${negated}.x=0`], `${negated}.x=0`, negated);
         }
         if (option.includes("-")) {
+            const mixed = `--${mixedCase(option)}`;
             for (const value of [...REFUSED, "true", "false"]) {
-                refused(`--${mixedCase(option)}`, value);
+                refused(mixed, value);
             }
+            dotted([`${mixed}.x=0`], `${mixed}.x=0`, mixed);
         }
     }
     // Options that are not boolean keep their values.
@@ -213,11 +250,13 @@ const tableOf = (command: Command) => {
     }
     // After --, an argument is not an option: yargs passes it on in argv._.
     for (const option of command.options.boolean) {
-        rows.push({
-            args: [...base, "--", `--${option}=1`],
-            keys: ["_"],
-            outcome: { argv: { _: [command.name, `--${option}=1`] } },
-        });
+        for (const given of [`--${option}=1`, `--${option}.x=0`]) {
+            rows.push({
+                args: [...base, "--", given],
+                keys: ["_"],
+                outcome: { argv: { _: [command.name, given] } },
+            });
+        }
     }
     return rows;
 };

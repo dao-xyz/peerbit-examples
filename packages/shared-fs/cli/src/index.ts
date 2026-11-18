@@ -1296,6 +1296,9 @@ const VALUED_BOOLEAN_HINTS = new Map([
     ["persist-on-exit", "set the wait with --persist-timeout-ms"],
 ]);
 
+/** yargs-parser's negative number: an argument it can take as a value. */
+const NEGATIVE_NUMBER = /^-([0-9]+(\.[0-9]+)?|\.[0-9]+)$/;
+
 /**
  * The refusal of the first argument before `--` that gives a boolean option
  * a value: yargs reads any value but true or false as false, so
@@ -1306,7 +1309,10 @@ const VALUED_BOOLEAN_HINTS = new Map([
  * camelCase of <name> (--fail-If-any=1 sets failIfAny) and keeps the value
  * as given there: a spelling the option reaches only that way takes no value
  * at all, and neither does --no-<option>=<value>, which yargs does not read
- * as the option.
+ * as the option. A dotted <name> sets the option its first segment names to
+ * an object, which reads as on (--assume-complete.x=0 and
+ * --no-assume-complete.x both turn the override on), so it is refused in
+ * every form, with the next argument where yargs takes that as its value.
  */
 const valuedBooleanFlagRefusal = (
     args: readonly string[],
@@ -1323,20 +1329,34 @@ const valuedBooleanFlagRefusal = (
         (name.includes("-")
             ? spellings.get(Parser.camelCase(name))
             : undefined);
-    for (const arg of args) {
+    for (const [index, arg] of args.entries()) {
         if (arg === "--") break;
-        const flag = /^--([^=]+)=(.*)$/s.exec(arg);
+        const flag = /^--([^=]+)(=.*)?$/s.exec(arg);
         if (!flag) continue;
-        const [, name, value] = flag;
+        const [, name, assignment] = flag;
+        const [head, ...fields] = name.split(".");
+        const negated = head.startsWith("no-");
         const option =
-            owner(name) ??
-            (name.startsWith("no-") ? owner(name.slice(3)) : undefined);
+            owner(head) ?? (negated ? owner(head.slice(3)) : undefined);
         if (option === undefined) continue;
-        if ((value === "true" || value === "false") && spellings.has(name)) {
-            continue;
+        // yargs takes the next argument as the value of a name that is not
+        // a spelling of the option, unless the name is negated or the
+        // argument starts with a hyphen and is not a negative number.
+        const next = args[index + 1];
+        const taken =
+            assignment === undefined &&
+            !negated &&
+            next !== undefined &&
+            (!next.startsWith("-") || NEGATIVE_NUMBER.test(next));
+        if (fields.length === 0) {
+            if (assignment === undefined) continue;
+            if (spellings.has(name) && /^=(true|false)$/.test(assignment)) {
+                continue;
+            }
         }
         const hint = VALUED_BOOLEAN_HINTS.get(option);
-        return `${arg}: --${name} takes no value${hint ? `; ${hint}` : ""}`;
+        const given = taken ? `${arg} ${next}` : arg;
+        return `${given}: --${head} takes no value${hint ? `; ${hint}` : ""}`;
     }
     return undefined;
 };
