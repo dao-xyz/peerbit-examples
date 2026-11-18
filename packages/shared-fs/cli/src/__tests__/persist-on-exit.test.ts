@@ -20,6 +20,7 @@ import { reportAdapterExit } from "../external-native-adapter.js";
 import {
     exitAfterStop,
     exitOnceFlushed,
+    guardMountStart,
     persistOnExit,
     runCli,
     stopMountSession,
@@ -241,6 +242,49 @@ describe("mount shutdown requests", () => {
         busy.release();
         await busy.stopped;
         expect(lines).toEqual([]);
+    });
+
+    it("exits at once with 130 on a shutdown signal while the mount starts, until the stop takes over", () => {
+        const host = fakeHost();
+        const handOver = guardMountStart(host as any);
+        for (const name of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
+            host.emit(name);
+            expect(host.exit, name).toHaveBeenLastCalledWith(130);
+        }
+        expect(host.exit).toHaveBeenCalledTimes(4);
+        // An exit code already set, such as 1, is kept.
+        process.exitCode = 1;
+        host.emit("SIGINT");
+        expect(host.exit).toHaveBeenLastCalledWith(1);
+        handOver();
+        for (const name of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
+            expect(host.listenerCount(name), name).toBe(0);
+        }
+    });
+
+    it("hands the shutdown signals to the stop without a moment in which none is listened for", () => {
+        const host = fakeHost();
+        const handOver = guardMountStart(host as any);
+        const names = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"];
+        const stop = vi.fn();
+        const before: number[] = [];
+        expect(
+            handOver(() => {
+                for (const name of names) {
+                    before.push(host.listenerCount(name));
+                    host.on(name, stop);
+                }
+                return "stopped";
+            })
+        ).toBe("stopped");
+        // The start's listeners were still there when the stop's came.
+        expect(before).toEqual([1, 1, 1, 1]);
+        for (const name of names) {
+            expect(host.listeners(name), name).toEqual([stop]);
+            host.emit(name);
+        }
+        expect(stop).toHaveBeenCalledTimes(4);
+        expect(host.exit).not.toHaveBeenCalled();
     });
 
     it("keeps an adapter failure's 70 over 75 and 130, and a failed step's 1 over 70", async () => {

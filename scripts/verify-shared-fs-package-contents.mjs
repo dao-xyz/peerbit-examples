@@ -43,8 +43,8 @@ const packages = [
         // #434's --peer redial with N4's conflicts gate: about 342 KB.
         // Persist-on-exit: about 356 KB. Refusing valued boolean flags:
         // about 365 KB. Adapter supervision: about 387 KB.
-        // Commands through a running mount's control endpoint: about 448 KB.
-        maxUnpackedBytes: 455_000,
+        // Commands through a running mount's control endpoint: about 463 KB.
+        maxUnpackedBytes: 465_000,
         requiredPaths: [
             "LICENSE",
             "README.md",

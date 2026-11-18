@@ -38,11 +38,25 @@ const SOCKET_NAME = "socket";
 const SUN_PATH_BYTES = process.platform === "linux" ? 108 : 104;
 const SHORT_SOCKET_PREFIX = "/tmp/pbfs-ctl-";
 
-/** A connection whose request line grows past this is closed. */
-const MAX_REQUEST_BYTES = 1 << 20;
+/** The endpoint's bounds. Tests shorten them. */
+export type MountControlLimits = {
+    /** A request line longer than this many bytes closes its connection. */
+    requestBytes: number;
+    /**
+     * So does one not complete this long after the connection opened,
+     * however steadily its bytes come.
+     */
+    requestMs: number;
+    /** A stop waits this long for the commands that began a change. */
+    stopWaitMs: number;
+};
 
-/** A connection that sends no request line in this long is closed. */
-const REQUEST_LINE_TIMEOUT_MS = 30_000;
+/** The bounds of a mount's endpoint. */
+export const MOUNT_CONTROL_LIMITS: Readonly<MountControlLimits> = {
+    requestBytes: 1 << 20,
+    requestMs: 30_000,
+    stopWaitMs: 10_000,
+};
 
 /** Windows PowerShell gets this long to restrict the named pipe. */
 const RESTRICT_PIPE_TIMEOUT_MS = 30_000;
@@ -50,6 +64,12 @@ const RESTRICT_PIPE_TIMEOUT_MS = 30_000;
 export type MountControlRecord = {
     protocol: number;
     pid: number;
+    /**
+     * The state directory's device and inode. A copy of the record in
+     * another directory (a copy of the state directory, or one restored from
+     * a backup) does not match that directory: it names no mount there.
+     */
+    directory: string;
     /** Absent when the mount could not serve an endpoint. */
     endpoint?: string;
     token?: string;
@@ -98,11 +118,15 @@ export class MountControlRefusal extends Error {}
 /**
  * Runs one request on the mount and resolves with the exit code it set.
  * `signal` aborts once the client went away or the mount began to stop.
+ * The handler calls `beginChange()` just before it changes the filesystem:
+ * it throws once `signal` aborted, and from then on a stop waits for the
+ * request (up to its limit) instead of cutting it off.
  */
 export type MountControlHandler = (
     request: Pick<MountControlRequest, "command" | "argv" | "output">,
     print: (message: MountControlPrint) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    beginChange: () => void
 ) => Promise<number | undefined>;
 
 /** What a command prints when a running mount holds its state directory. */
@@ -122,16 +146,25 @@ const errorCode = (error: unknown) =>
     (error as NodeJS.ErrnoException)?.code ??
     (error instanceof Error ? error.message : String(error));
 
+/** A directory's device and inode, which a copy of it does not share. */
+const directoryIdentity = (directory: string) => {
+    const { dev, ino } = fs.statSync(directory, { bigint: true });
+    return `${dev}:${ino}`;
+};
+
 /**
  * The mount record of `directory`, or undefined if there is none or it is
- * not one a mount of this user wrote: on POSIX a regular file of this user
- * that no one else may read.
+ * not one a mount of this user wrote for this directory: on POSIX a regular
+ * file of this user that no one else may read, and never one copied from
+ * another directory.
  */
 export const readMountControl = (
     directory: string
 ): MountControlRecord | undefined => {
     let text: string;
+    let identity: string;
     try {
+        identity = directoryIdentity(directory);
         const fd = fs.openSync(
             path.join(directory, MOUNT_CONTROL_FILE),
             fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0)
@@ -151,11 +184,20 @@ export const readMountControl = (
         return undefined;
     }
     try {
-        const { protocol, pid, endpoint, token } = JSON.parse(text);
-        if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+        const {
+            protocol,
+            pid,
+            directory: owner,
+            endpoint,
+            token,
+        } = JSON.parse(text);
+        if (!Number.isSafeInteger(pid) || pid <= 0 || owner !== identity) {
+            return undefined;
+        }
         return {
             protocol,
             pid,
+            directory: identity,
             ...(typeof endpoint === "string" && typeof token === "string"
                 ? { endpoint, token }
                 : {}),
@@ -275,13 +317,22 @@ const isShortSocketDirectory = (directory: string) =>
     directory.startsWith(SHORT_SOCKET_PREFIX) &&
     !directory.slice(SHORT_SOCKET_PREFIX.length).includes("/");
 
-/** Removes what a mount that did not stop cleanly left; never throws. */
+/**
+ * Removes what a mount of this directory left that did not stop cleanly:
+ * the socket directory in the state directory, and the one under /tmp its
+ * record names, unless that record's process still runs (another process
+ * that got its pid). Never throws.
+ */
 const removeStale = (stateDirectory: string) => {
-    const stale = readMountControl(stateDirectory)?.endpoint;
+    const stale = readMountControl(stateDirectory);
+    const named =
+        stale?.endpoint === undefined || processAlive(stale.pid)
+            ? undefined
+            : path.dirname(stale.endpoint);
     const candidates = [
         path.join(stateDirectory, MOUNT_CONTROL_SOCKET_DIRECTORY),
-        ...(stale !== undefined && isShortSocketDirectory(path.dirname(stale))
-            ? [path.dirname(stale)]
+        ...(named !== undefined && isShortSocketDirectory(named)
+            ? [named]
             : []),
     ];
     for (const directory of candidates) {
@@ -368,28 +419,33 @@ const describeError = (error: unknown) => {
     };
 };
 
-const readRequestLine = (socket: net.Socket) =>
+/** The request line, up to `maxBytes` bytes; each chunk is searched once. */
+const readRequestLine = (socket: net.Socket, maxBytes: number) =>
     new Promise<string>((resolve, reject) => {
-        let buffered = "";
+        const chunks: Buffer[] = [];
+        let bytes = 0;
         const cleanup = () => {
             socket.off("data", onData).off("end", onEnd).off("close", onEnd);
         };
-        const onData = (chunk: string) => {
-            buffered += chunk;
-            const end = buffered.indexOf("\n");
-            if (end >= 0) {
-                cleanup();
-                resolve(buffered.slice(0, end));
-            } else if (buffered.length > MAX_REQUEST_BYTES) {
+        const onData = (chunk: Buffer) => {
+            const end = chunk.indexOf(0x0a);
+            const length = bytes + (end >= 0 ? end : chunk.length);
+            if (length > maxBytes) {
                 cleanup();
                 reject(new Error("request line too long"));
+            } else if (end < 0) {
+                chunks.push(chunk);
+                bytes = length;
+            } else {
+                cleanup();
+                chunks.push(chunk.subarray(0, end));
+                resolve(Buffer.concat(chunks, length).toString("utf8"));
             }
         };
         const onEnd = () => {
             cleanup();
             reject(new Error("no request line"));
         };
-        socket.setEncoding("utf8");
         socket.on("data", onData).once("end", onEnd).once("close", onEnd);
     });
 
@@ -411,10 +467,28 @@ export type MountControl = {
     endpoint?: string;
     /** Why no endpoint is served. */
     failure?: string;
-    /** Refuses new requests ("it is stopping") and ends those in flight. */
-    stopServing(): void;
-    /** Stops listening and removes the socket and the record. */
+    /**
+     * Refuses new requests ("it is stopping") and cuts off those that have
+     * not begun a change. Resolves once those that have are answered, or
+     * once the stop's wait is over; it then cuts them off too.
+     */
+    stopServing(): Promise<void>;
+    /**
+     * Cuts off every request, stops listening and removes the socket and
+     * the record.
+     */
     close(): Promise<void>;
+};
+
+/** A connection's request, as a stop sees it. */
+type Served = {
+    abort: AbortController;
+    /** It began a change: a stop waits for it. */
+    changing: boolean;
+    /** Its answer is sent, or the connection was refused. */
+    answered: boolean;
+    /** Settles once it is answered; from when its request line arrived. */
+    answering?: Promise<void>;
 };
 
 /**
@@ -430,83 +504,106 @@ export const startMountControl = async (options: {
     directory: string;
     cliVersion: string;
     handle: MountControlHandler;
+    limits?: Partial<MountControlLimits>;
 }): Promise<MountControl> => {
+    const limits = { ...MOUNT_CONTROL_LIMITS, ...options.limits };
     const record = path.join(options.directory, MOUNT_CONTROL_FILE);
     const token = randomBytes(32).toString("base64url");
     const tokenDigest = sha256(token);
-    const connections = new Set<net.Socket>();
+    const connections = new Map<net.Socket, Served>();
     let stopping = false;
 
+    /** Ends a request: its signal aborts at once, before any change. */
+    const cutOff = (socket: net.Socket, served: Served, reason: string) => {
+        served.abort.abort(new Error(reason));
+        socket.destroy();
+    };
+
     const serve = (socket: net.Socket) => {
-        const abort = new AbortController();
-        connections.add(socket);
+        const served: Served = {
+            abort: new AbortController(),
+            changing: false,
+            answered: false,
+        };
+        connections.set(socket, served);
+        // The whole request line by then, however slowly it comes.
+        const deadline = setTimeout(() => socket.destroy(), limits.requestMs);
         socket.on("error", () => socket.destroy());
         socket.once("close", () => {
+            clearTimeout(deadline);
             connections.delete(socket);
-            abort.abort(new Error("the control connection closed"));
+            served.abort.abort(new Error("the control connection closed"));
         });
-        socket.setTimeout(REQUEST_LINE_TIMEOUT_MS, () => socket.destroy());
         const send = (message: MountControlResponse) => {
             if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`);
         };
         const finish = (message: MountControlResponse) => {
+            served.answered = true;
             send(message);
             socket.end();
         };
         const refuse = (reason: string) => finish({ type: "refused", reason });
-        void readRequestLine(socket).then(
-            async (line) => {
-                socket.setTimeout(0);
-                let request: Partial<MountControlRequest>;
-                try {
-                    request = JSON.parse(line);
-                } catch {
-                    return refuse("the request is not JSON");
+        const beginChange = () => {
+            served.abort.signal.throwIfAborted();
+            served.changing = true;
+        };
+        const answer = async (line: string) => {
+            let request: Partial<MountControlRequest>;
+            try {
+                request = JSON.parse(line);
+            } catch {
+                return refuse("the request is not JSON");
+            }
+            if (request?.protocol !== MOUNT_CONTROL_PROTOCOL) {
+                return refuse(
+                    `it speaks control protocol ${MOUNT_CONTROL_PROTOCOL}, not ${String(request?.protocol)}`
+                );
+            }
+            if (
+                typeof request.token !== "string" ||
+                !timingSafeEqual(sha256(request.token), tokenDigest)
+            ) {
+                return refuse(
+                    `the token does not match the one in ${MOUNT_CONTROL_FILE}`
+                );
+            }
+            if (stopping) return refuse("it is stopping");
+            if (request.cli !== options.cliVersion) {
+                return refuse(
+                    `it runs peerbit-fs ${options.cliVersion} and this is ${String(request.cli)}: run that version, or restart the mount`
+                );
+            }
+            if (
+                typeof request.command !== "string" ||
+                typeof request.argv !== "object" ||
+                request.argv === null
+            ) {
+                return refuse("the request names no command");
+            }
+            try {
+                const exitCode = await options.handle(
+                    {
+                        command: request.command,
+                        argv: request.argv,
+                        output: outputOf(request.output),
+                    },
+                    send,
+                    served.abort.signal,
+                    beginChange
+                );
+                finish({ type: "done", exitCode: exitCode ?? null });
+            } catch (error) {
+                if (error instanceof MountControlRefusal) {
+                    refuse(error.message);
+                } else {
+                    finish({ type: "failed", error: describeError(error) });
                 }
-                if (request?.protocol !== MOUNT_CONTROL_PROTOCOL) {
-                    return refuse(
-                        `it speaks control protocol ${MOUNT_CONTROL_PROTOCOL}, not ${String(request?.protocol)}`
-                    );
-                }
-                if (
-                    typeof request.token !== "string" ||
-                    !timingSafeEqual(sha256(request.token), tokenDigest)
-                ) {
-                    return refuse(
-                        `the token does not match the one in ${MOUNT_CONTROL_FILE}`
-                    );
-                }
-                if (stopping) return refuse("it is stopping");
-                if (request.cli !== options.cliVersion) {
-                    return refuse(
-                        `it runs peerbit-fs ${options.cliVersion} and this is ${String(request.cli)}: run that version, or restart the mount`
-                    );
-                }
-                if (
-                    typeof request.command !== "string" ||
-                    typeof request.argv !== "object" ||
-                    request.argv === null
-                ) {
-                    return refuse("the request names no command");
-                }
-                try {
-                    const exitCode = await options.handle(
-                        {
-                            command: request.command,
-                            argv: request.argv,
-                            output: outputOf(request.output),
-                        },
-                        send,
-                        abort.signal
-                    );
-                    finish({ type: "done", exitCode: exitCode ?? null });
-                } catch (error) {
-                    if (error instanceof MountControlRefusal) {
-                        refuse(error.message);
-                    } else {
-                        finish({ type: "failed", error: describeError(error) });
-                    }
-                }
+            }
+        };
+        void readRequestLine(socket, limits.requestBytes).then(
+            (line) => {
+                clearTimeout(deadline);
+                served.answering = answer(line);
             },
             () => socket.destroy()
         );
@@ -551,6 +648,7 @@ export const startMountControl = async (options: {
             `${JSON.stringify({
                 protocol: MOUNT_CONTROL_PROTOCOL,
                 pid: process.pid,
+                directory: directoryIdentity(options.directory),
                 ...(bound ? { endpoint: bound.endpoint, token } : {}),
             } satisfies MountControlRecord)}\n`,
             { mode: 0o600, flag: "wx" }
@@ -563,9 +661,31 @@ export const startMountControl = async (options: {
         throw error;
     }
 
-    const stopServing = () => {
+    const stopServing = async () => {
         stopping = true;
-        for (const socket of connections) socket.destroy();
+        const changes: Promise<void>[] = [];
+        for (const [socket, served] of connections) {
+            if (served.changing) changes.push(served.answering!);
+            else if (!served.answered) {
+                cutOff(socket, served, "the mount is stopping");
+            }
+        }
+        if (changes.length > 0) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([
+                Promise.allSettled(changes),
+                new Promise<void>((resolve) => {
+                    timer = setTimeout(resolve, limits.stopWaitMs);
+                }),
+            ]);
+            clearTimeout(timer);
+        }
+        // Changes still under way are not waited for any longer.
+        for (const [socket, served] of connections) {
+            if (!served.answered) {
+                cutOff(socket, served, "the mount is stopping");
+            }
+        }
     };
     let closed: Promise<void> | undefined;
     return {
@@ -574,7 +694,10 @@ export const startMountControl = async (options: {
         stopServing,
         close: () =>
             (closed ??= (async () => {
-                stopServing();
+                stopping = true;
+                for (const [socket, served] of connections) {
+                    cutOff(socket, served, "the mount is stopping");
+                }
                 process.off("exit", remove);
                 remove();
                 await new Promise<void>((resolve) =>

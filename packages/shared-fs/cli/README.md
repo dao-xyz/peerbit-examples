@@ -599,8 +599,10 @@ run, then `mount` prints the first failure on one line and exits 1. A second
 request aborts the wait while it runs (the list is printed, then `mount`
 exits at once, without stopping Peerbit) and otherwise exits at once. One
 within 100 ms of the last is taken for the copy of a Ctrl-C that npm, pnpm
-and npx pass on: it only prints a hint. Windows has no SIGTERM: `taskkill`
-and `child.kill()` skip all this, so send `shutdown`; a closed console window
+and npx pass on: it only prints a hint. A shutdown signal while `mount` is
+still starting, before it has mounted, exits at once too; a `shutdown` line
+is read once it has mounted. Windows has no SIGTERM: `taskkill` and
+`child.kill()` skip all this, so send `shutdown`; a closed console window
 leaves about 10 s.
 
 Exit codes: 0 stopped; 1 failed, or an open file could not be saved
@@ -608,10 +610,11 @@ Exit codes: 0 stopped; 1 failed, or an open file could not be saved
 75 the wait gave up, with one
 `persist-on-exit: unacknowledged {"path":...,"ids":[...]}` line per path (ids
 with no path: `"path":null`; 200, then `unlisted {"paths":n}`) for writes
-that stay saved here with no receipt; 130 a second request stopped it. 1 is
-kept over 70, 75 and 130, 70 over 75 and 130, and 75 over 130. Unlike
-`prepare-disposal`, it fences only this session's own writes, while other
-writers keep writing; retire a machine with `prepare-disposal`.
+that stay saved here with no receipt; 130 a second request stopped it, or a
+shutdown signal while it was starting. 1 is kept over 70, 75 and 130, 70 over
+75 and 130, and 75 over 130. Unlike `prepare-disposal`, it fences only this
+session's own writes, while other writers keep writing; retire a machine with
+`prepare-disposal`.
 
 ## Run a mount under a supervisor
 
@@ -683,7 +686,12 @@ and on its network: `--machine`, `--peer` and `--bootstrap` are not used,
 though a malformed address in them is still refused. The address must be the
 one the mount serves. Ctrl-C on such a command ends its request: a wait for
 write readiness ends with it, and a change that already started completes.
-Stopping the mount cuts off the commands under way.
+A stopping mount refuses commands from the start of its stop and cuts off
+those under way that have not begun to change the filesystem. It waits up to
+10 s for one that has: its change is then done before the mount detaches and
+Peerbit stops, it prints its result, and persist-on-exit, which comes later,
+waits for the filesystem entries it wrote too (not trust edges). Then the
+stop goes on and cuts off a command still running.
 
 Every other command that opens the state directory (`create`, `whoami`,
 `mount`, `benchmark`, `snapshot`, `prepare-disposal`) prints one line and
@@ -713,20 +721,27 @@ The mount serves these commands on a control endpoint only its user can use:
   endpoint, and says so.
 
 Each request also carries a random 256-bit token that `mount` writes, with its
-pid and the endpoint, to `<directory>/mount-control.json`: mode 0600 on Linux
-and macOS; on Windows the state directory's own permissions apply. The mount
-compares the token in constant time and refuses a request without it. A
-command reads that file only if it is a regular file of its own user that no
-one else may read, and connects only to a socket whose directory is its own
-user's and closed to others. A request is one line of JSON per connection,
-with a protocol version; the mount refuses another protocol version or
-another peerbit-fs version.
+pid, the endpoint and the state directory's device and inode numbers, to
+`<directory>/mount-control.json`: mode 0600 on Linux and macOS; on Windows
+the state directory's own permissions apply. The mount compares the token in
+constant time and refuses a request without it. A command reads that file
+only if it is a regular file of its own user that no one else may read, and
+connects only to a socket whose directory is its own user's and closed to
+others. The file counts only in the directory it was written for: a copy in
+another directory names no mount there. A request is one line of JSON per
+connection, with a protocol version, of at most 1 MiB, which must arrive
+within 30 s of connecting; the mount closes a connection that sends more or
+takes longer, and refuses another protocol version or another peerbit-fs
+version.
 
 `mount` removes the socket and the token file whenever it exits: after a
-stop, after its adapter died (exit 70), after a failed start, and on a second
-request's immediate exit. A `mount` that was killed cannot: what it left names
-a process that is gone, so commands ignore it and open the directory, and the
-next `mount` there replaces it.
+stop, after its adapter died (exit 70), after a failed start, on a second
+request's immediate exit, and on a shutdown signal while it is still starting
+(exit 130). A `mount` that was killed cannot: what it left names a process
+that is gone, so commands ignore it and open the directory, and the next
+`mount` there replaces it. It removes a socket directory under `/tmp` that
+such a file names only if the file is its directory's own and names a
+process that is gone.
 
 ## Safely dispose of a machine
 

@@ -2599,7 +2599,7 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("detaches the backend and closes the mount profile before persisting and stopping Peerbit", async () => {
+    it("refuses control requests first, detaches the backend and closes the mount profile before persisting, and removes the control endpoint just before stopping Peerbit", async () => {
         const order: string[] = [];
         const profileWriter = {
             sink: () => {},
@@ -2620,6 +2620,17 @@ describe("peerbit-fs cli", () => {
             },
         };
         const session = (failures: Partial<Record<string, Error>> = {}) => ({
+            // Requests are refused through the persist-on-exit wait, and the
+            // endpoint is removed while this process holds the directory.
+            control: {
+                stopServing: async () => {
+                    order.push("stopServing");
+                },
+                close: async () => {
+                    order.push("close");
+                    if (failures.close) throw failures.close;
+                },
+            },
             mounted: {
                 unmount: async () => {
                     order.push("unmount");
@@ -2646,11 +2657,13 @@ describe("peerbit-fs cli", () => {
             },
         });
         const everyStep = [
+            "stopServing",
             "unmount",
             "ipc",
             "dispose",
             "profile",
             "persist",
+            "close",
             "peerbit",
         ];
 
@@ -2680,11 +2693,16 @@ describe("peerbit-fs cli", () => {
         expect(order).toEqual(everyStep);
         expect(process.exitCode).toBe(1);
 
-        // The error path runs every step and swallows failures.
+        // The error path (a failed start) runs every step and swallows
+        // failures, the endpoint's removal too.
         order.length = 0;
         process.exitCode = undefined;
         await stopMountSession(
-            session({ unmount: unmountFailure, peerbit: stopFailure }),
+            session({
+                unmount: unmountFailure,
+                close: new Error("close failed"),
+                peerbit: stopFailure,
+            }),
             { ignoreErrors: true }
         );
         expect(order).toEqual(everyStep);

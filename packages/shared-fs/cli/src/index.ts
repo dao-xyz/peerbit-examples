@@ -102,6 +102,12 @@ type CliOutput = {
     exit(code: number): void;
     /** Through a mount: aborts once its client went away or it stops. */
     signal?: AbortSignal;
+    /**
+     * Through a mount: called just before the command changes the
+     * filesystem. It throws once `signal` aborted; from then on, the
+     * mount's stop waits for the command.
+     */
+    beginChange?(): void;
 };
 
 const consoleOutput: CliOutput = {
@@ -473,9 +479,12 @@ const closeMountProfile = async (
 export const stopMountSession = async (
     session: {
         /**
-         * The control endpoint: it refuses commands from the start, and is
-         * removed just before Peerbit stops, while this process still holds
-         * the state directory (a mount started after that writes its own).
+         * The control endpoint: it refuses commands from the start, and the
+         * stop waits for those that began a change, so that it is done
+         * before the mount detaches and Peerbit stops, and persist-on-exit
+         * waits for the filesystem entries they wrote. It is removed just
+         * before Peerbit stops, while this process still holds the state
+         * directory (a mount started after that writes its own).
          */
         control?: Pick<MountControl, "stopServing" | "close">;
         mounted?: { unmount(): Promise<void> };
@@ -528,6 +537,33 @@ export type MountShutdown = {
 
 const ignore = () => {};
 
+/** The signals that are shutdown requests for a mount. */
+const SHUTDOWN_SIGNALS = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] as const;
+
+/**
+ * While a mount starts, before waitForTermination can run its stop, a
+ * shutdown signal exits at once with 130, as a second request does. The
+ * exit runs the control endpoint's exit handler, which removes the socket
+ * and the record that the signal's default action, killing the process,
+ * would leave. The function returned hands the signals over: it runs
+ * `next`, which adds the stop's listeners, and then removes these. A signal
+ * thus always finds a listener: without one, Node restores the default
+ * action.
+ */
+export const guardMountStart = (
+    host: Pick<NodeJS.Process, "on" | "off" | "exit"> = process
+) => {
+    const request = () => host.exit(process.exitCode || 130);
+    for (const name of SHUTDOWN_SIGNALS) host.on(name, request);
+    return <T = undefined>(next: () => T = () => undefined as T): T => {
+        try {
+            return next();
+        } finally {
+            for (const name of SHUTDOWN_SIGNALS) host.off(name, request);
+        }
+    };
+};
+
 /**
  * A request this soon after the last one acted on is a copy: npm, pnpm and
  * npx pass on the Ctrl-C their child already got, within a millisecond.
@@ -554,7 +590,6 @@ export const waitForTermination = (
             waiting: false,
             exit: () => host.exit(process.exitCode || 130),
         };
-        const signals = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] as const;
         const keepAlive = setInterval(() => {}, 1 << 30);
         let last = -Infinity;
         const request = () => {
@@ -583,7 +618,7 @@ export const waitForTermination = (
             String(data)
                 .split(/\r?\n/)
                 .forEach((line) => line.trim() === "shutdown" && request());
-        for (const name of signals) host.on(name, request);
+        for (const name of SHUTDOWN_SIGNALS) host.on(name, request);
         if (!input.isTTY) input.on("data", onData);
         void ended?.then(() => last < 0 && request(), ignore);
     });
@@ -1732,7 +1767,7 @@ const runResolveConflict = async (
             `Version ${argv.versionId} is not a current conflict head for ${normalizedPath}; rerun peerbit-fs conflicts before retrying`
         );
     }
-    out.signal?.throwIfAborted();
+    out.beginChange?.();
     const resolution = await fsHandle.resolveConflict(
         normalizedPath,
         argv.versionId
@@ -1800,7 +1835,7 @@ const runResolveNamingConflict = async (
     const expectedEventIds = [
         ...new Set(observedConflicts.flatMap((conflict) => conflict.eventIds)),
     ].sort();
-    out.signal?.throwIfAborted();
+    out.beginChange?.();
     const resolution = await fsHandle.resolveNamingConflict(
         argv.nodeId,
         action,
@@ -1859,7 +1894,7 @@ const runTrust = async (
 ) => {
     const { decodePublicSignKey } = await loadSharedFsRuntime();
     const key = decodePublicSignKey(String(argv.publicKey));
-    out.signal?.throwIfAborted();
+    out.beginChange?.();
     await fsHandle.authorizeWriter(key);
     out.log(out.chalk.green("Writer trusted"));
 };
@@ -1871,7 +1906,7 @@ const runRevoke = async (
 ) => {
     const { decodePublicSignKey } = await loadSharedFsRuntime();
     const key = decodePublicSignKey(String(argv.publicKey));
-    out.signal?.throwIfAborted();
+    out.beginChange?.();
     await fsHandle.revokeWriter(key);
     const stillTrusted = await fsHandle.isTrustedWriter(key);
     out.log(
@@ -1902,7 +1937,7 @@ const runGc = async (
     },
     out: CliOutput
 ) => {
-    out.signal?.throwIfAborted();
+    out.beginChange?.();
     const report = await fsHandle.collectGarbage({
         keepVersions: argv.keepVersions,
         retentionMs: argv.retentionDays
@@ -1985,7 +2020,8 @@ type ServedCommand = keyof typeof SERVED_COMMANDS;
 const controlOutput = (
     output: MountControlOutput,
     print: (message: MountControlPrint) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    beginChange: () => void
 ) => {
     const out: CliOutput & { exitCode?: number } = {
         chalk: new Chalk({ level: output.color }),
@@ -2000,16 +2036,21 @@ const controlOutput = (
             out.exitCode = code;
         },
         signal,
+        beginChange,
     };
     return out;
 };
 
-/** Runs a request a mount's control endpoint received. */
-const serveMountRequest = async (
+/**
+ * Runs a request a mount's control endpoint received, on `live`, the
+ * mount's filesystem once it is open.
+ */
+export const serveMountRequest = async (
     live: LiveFs | undefined,
     request: Parameters<MountControlHandler>[0],
     print: (message: MountControlPrint) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    beginChange: () => void
 ) => {
     if (!Object.hasOwn(SERVED_COMMANDS, request.command)) {
         throw new MountControlRefusal(
@@ -2026,7 +2067,7 @@ const serveMountRequest = async (
             `it serves ${live.fsHandle.address}, not ${String(request.argv.address)}`
         );
     }
-    const out = controlOutput(request.output, print, signal);
+    const out = controlOutput(request.output, print, signal, beginChange);
     await SERVED_COMMANDS[request.command as ServedCommand](
         live,
         request.argv as never,
@@ -2568,6 +2609,18 @@ export const createCliParser = (args: string[]) => {
                 let fsHandle!: Awaited<ReturnType<typeof openCliFs>>;
                 // Settles, reported, if the adapter exits on its own.
                 let adapterExited: Promise<void> | undefined;
+                // What a stop takes down: what the start set up so far.
+                const session = () => ({
+                    control,
+                    mounted,
+                    ipc,
+                    backend,
+                    profileWriter,
+                    stopPeerbit: () => stopPeerbitForCli(peerbit),
+                });
+                // Until waitForTermination below takes over, a shutdown
+                // request exits at once and removes the control endpoint.
+                const handOver = guardMountStart();
                 try {
                     // Now that this process holds the state directory, so
                     // that a command for it names this mount from here on.
@@ -2575,8 +2628,14 @@ export const createCliParser = (args: string[]) => {
                         control = await startMountControl({
                             directory,
                             cliVersion: await readCliPackageVersion(),
-                            handle: (request, print, signal) =>
-                                serveMountRequest(live, request, print, signal),
+                            handle: (request, print, signal, beginChange) =>
+                                serveMountRequest(
+                                    live,
+                                    request,
+                                    print,
+                                    signal,
+                                    beginChange
+                                ),
                         });
                     }
                     const unreachable = await connectMountToNetwork(
@@ -2669,38 +2728,26 @@ export const createCliParser = (args: string[]) => {
                             : "gc schedule: off"
                     );
                 } catch (error) {
-                    await stopMountSession(
-                        {
-                            control,
-                            mounted,
-                            ipc,
-                            backend,
-                            profileWriter,
-                            stopPeerbit: () => stopPeerbitForCli(peerbit),
-                        },
-                        { ignoreErrors: true }
-                    );
+                    await stopMountSession(session(), { ignoreErrors: true });
+                    handOver();
                     throw error;
                 }
                 // An adapter that exits on its own ends the mount through the
                 // same stop as a shutdown request: drain, persist-on-exit and
                 // Peerbit's stop still run.
                 await exitAfterStop(
-                    waitForTermination(
-                        (shutdown) =>
-                            stopMountSession({
-                                control,
-                                mounted,
-                                ipc,
-                                backend,
-                                profileWriter,
-                                persist: () =>
-                                    persistOnExit(fsHandle, argv, shutdown),
-                                stopPeerbit: () => stopPeerbitForCli(peerbit),
-                            }),
-                        process,
-                        process.stdin,
-                        adapterExited
+                    handOver(() =>
+                        waitForTermination(
+                            (shutdown) =>
+                                stopMountSession({
+                                    ...session(),
+                                    persist: () =>
+                                        persistOnExit(fsHandle, argv, shutdown),
+                                }),
+                            process,
+                            process.stdin,
+                            adapterExited
+                        )
                     )
                 );
             })

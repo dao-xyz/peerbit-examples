@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { Peerbit, encodePublicSignKey, openSharedFs } from "@peerbit/shared-fs";
+import chalk, { Chalk } from "chalk";
 import {
     afterAll,
     afterEach,
@@ -16,9 +17,10 @@ import {
     it,
     vi,
 } from "vitest";
-import { runCli } from "../index.js";
+import { runCli, serveMountRequest } from "../index.js";
 import {
     MOUNT_CONTROL_FILE,
+    MOUNT_CONTROL_LIMITS,
     MOUNT_CONTROL_SOCKET_DIRECTORY,
     MountRunningError,
     callMountControl,
@@ -28,6 +30,7 @@ import {
     type MountControlPrint,
     type MountControlRecord,
 } from "../mount-control.js";
+import { readCliPackageVersion } from "../native-adapter.js";
 
 /**
  * A running mount's control endpoint: the endpoint itself (its owner-only
@@ -71,6 +74,13 @@ const request = (command: string, argv: Record<string, unknown> = {}) => ({
 });
 
 const ignore = () => {};
+
+/** A promise and the function that resolves it. */
+const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => (resolve = done));
+    return { promise, resolve };
+};
 
 /** A state directory whose socket path fits a socket address. */
 const stateDirectory = () => fsp.mkdtemp(path.join(os.tmpdir(), "pbfs-"));
@@ -117,6 +127,44 @@ const exchange = (endpoint: string, line: string) =>
                 )
             );
     });
+
+/**
+ * The JSON lines a raw request line is answered with, also when the
+ * endpoint closes the connection before the line is all written.
+ */
+const answers = (endpoint: string, line: string) =>
+    new Promise<unknown[]>((resolve) => {
+        let text = "";
+        const socket = net.createConnection(endpoint, () => socket.write(line));
+        socket
+            .setEncoding("utf8")
+            .on("data", (chunk: string) => (text += chunk))
+            // The rest of the line cannot be written then: EPIPE.
+            .on("error", ignore)
+            .on("close", () =>
+                resolve(
+                    text
+                        .split("\n")
+                        .filter(Boolean)
+                        .map((answer) => JSON.parse(answer))
+                )
+            );
+    });
+
+/** A request line with the record's token, as a command sends it. */
+const requestLine = (
+    record: MountControlRecord,
+    command: string,
+    argv: Record<string, unknown> = {},
+    cli = CLI
+) =>
+    `${JSON.stringify({ protocol: 1, token: record.token, ...request(command, argv), cli })}\n`;
+
+/** A state directory's identity in its mount record: device and inode. */
+const identity = (directory: string) => {
+    const { dev, ino } = fs.statSync(directory, { bigint: true });
+    return `${dev}:${ino}`;
+};
 
 /**
  * The named pipe's DACL as Windows PowerShell reads it: whether it is
@@ -198,6 +246,7 @@ describe("mount control endpoint", () => {
             expect(record).toEqual({
                 protocol: 1,
                 pid: process.pid,
+                directory: identity(directory),
                 endpoint: control.endpoint,
                 token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
             });
@@ -313,8 +362,96 @@ describe("mount control endpoint", () => {
             expect(await exchange(control.endpoint!, "status\n")).toEqual([
                 { type: "refused", reason: "the request is not JSON" },
             ]);
+            // The right token, but no command or no arguments.
+            for (const unnamed of [
+                { command: undefined },
+                { command: 7 },
+                { argv: null },
+                { argv: "status" },
+            ]) {
+                expect(
+                    await exchange(
+                        control.endpoint!,
+                        `${JSON.stringify({ protocol: 1, token, ...request("status"), ...unnamed })}\n`
+                    )
+                ).toEqual([
+                    { type: "refused", reason: "the request names no command" },
+                ]);
+            }
             expect(handle).not.toHaveBeenCalled();
         } finally {
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("cuts off a request line longer than 1 MiB, counted in bytes, without running it", async () => {
+        const directory = await stateDirectory();
+        const handle = vi.fn(async () => 0);
+        const control = await startMountControl({
+            directory,
+            cliVersion: CLI,
+            handle,
+        });
+        try {
+            const record = readMountControl(directory)!;
+            // A request line of exactly `bytes` bytes, padded mostly with a
+            // character of three bytes in UTF-8.
+            const ofBytes = (bytes: number) => {
+                const bare = Buffer.byteLength(
+                    requestLine(record, "status", { pad: "" })
+                );
+                // Without the newline, which ends the line.
+                const pad = bytes - (bare - 1);
+                const line = requestLine(record, "status", {
+                    pad: "€".repeat(Math.floor(pad / 3)) + "a".repeat(pad % 3),
+                });
+                expect(Buffer.byteLength(line)).toBe(bytes + 1);
+                return line;
+            };
+            expect(await answers(control.endpoint!, ofBytes(1 << 20))).toEqual([
+                { type: "done", exitCode: 0 },
+            ]);
+            expect(handle).toHaveBeenCalledTimes(1);
+            // One byte more, though about a third as many characters.
+            expect(
+                await answers(control.endpoint!, ofBytes((1 << 20) + 1))
+            ).toEqual([]);
+            expect(handle).toHaveBeenCalledTimes(1);
+        } finally {
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("closes a connection whose request line is not complete by the deadline, however steadily its bytes come", async () => {
+        expect(MOUNT_CONTROL_LIMITS.requestMs).toBe(30_000);
+        const directory = await stateDirectory();
+        const handle = vi.fn(async () => 0);
+        const control = await startMountControl({
+            directory,
+            cliVersion: CLI,
+            handle,
+            // Short here; 30 s in a mount.
+            limits: { requestMs: 500 },
+        });
+        const socket = net.createConnection(control.endpoint!);
+        socket.on("error", ignore);
+        const closed = new Promise<void>((resolve) =>
+            socket.once("close", () => resolve())
+        );
+        // A byte every 20 ms: the connection is never idle for long, and
+        // its request line never ends.
+        let trickle: ReturnType<typeof setInterval> | undefined;
+        socket.once("connect", () => {
+            trickle = setInterval(() => socket.write(" "), 20);
+        });
+        try {
+            await within(closed, "the endpoint closes the connection");
+            expect(handle).not.toHaveBeenCalled();
+        } finally {
+            clearInterval(trickle);
+            socket.destroy();
             await control.close();
             await removeDirectory(directory);
         }
@@ -352,13 +489,14 @@ describe("mount control endpoint", () => {
                     "a command beside it"
                 )
             ).toEqual({ reached: true, exitCode: 7 });
-            control.stopServing();
+            // gc began no change: the stop does not wait for it.
+            await within(control.stopServing(), "the stop cuts it off");
             expect(
                 await within(cutOff, "the client hears it was cut off")
             ).toBe(
                 `a mount is running for this directory (pid ${process.pid}); its control endpoint closed before peerbit-fs gc finished`
             );
-            expect(aborted).toEqual(new Error("the control connection closed"));
+            expect(aborted).toEqual(new Error("the mount is stopping"));
             expect(
                 await runningError(
                     callMountControl(record, request("status"), ignore)
@@ -371,6 +509,189 @@ describe("mount control endpoint", () => {
             await removeDirectory(directory);
         }
     });
+
+    /**
+     * An endpoint whose `trust` begins its change and then holds it until
+     * released, and whose `status` waits, changing nothing, until aborted.
+     */
+    const holdingChange = async (
+        directory: string,
+        limits?: { stopWaitMs: number }
+    ) => {
+        const held = deferred();
+        const changing = deferred();
+        const waiting = deferred();
+        const control = await startMountControl({
+            directory,
+            cliVersion: CLI,
+            limits,
+            handle: async (request, print, signal, beginChange) => {
+                if (request.command === "trust") {
+                    beginChange();
+                    changing.resolve();
+                    await held.promise;
+                    print({ type: "console", method: "log", text: "changed" });
+                    return 0;
+                }
+                waiting.resolve();
+                await new Promise((resolve) =>
+                    signal.addEventListener("abort", resolve)
+                );
+                // Throws: a stop or a client that went away aborted it.
+                beginChange();
+                return 0;
+            },
+        });
+        return {
+            control,
+            release: () => held.resolve(),
+            changing: changing.promise,
+            waiting: waiting.promise,
+        };
+    };
+
+    it("lets a stop wait for a command that began its change and answer it, and cuts off one that did not", async () => {
+        const directory = await stateDirectory();
+        const { control, release, changing, waiting } =
+            await holdingChange(directory);
+        try {
+            const record = readMountControl(directory)!;
+            const printed: MountControlPrint[] = [];
+            const trust = callMountControl(record, request("trust"), (line) =>
+                printed.push(line)
+            );
+            const status = runningError(
+                callMountControl(record, request("status"), ignore)
+            );
+            await within(changing, "trust begins its change");
+            await within(waiting, "status runs");
+            let stopped = false;
+            const stopping = control.stopServing().then(() => {
+                stopped = true;
+            });
+            expect(await within(status, "status is cut off")).toBe(
+                `a mount is running for this directory (pid ${process.pid}); its control endpoint closed before peerbit-fs status finished`
+            );
+            // Not while trust changes the filesystem.
+            expect(stopped).toBe(false);
+            release();
+            await within(stopping, "the stop has waited");
+            expect(await within(trust, "trust is answered")).toEqual({
+                reached: true,
+                exitCode: 0,
+            });
+            expect(printed).toEqual([
+                { type: "console", method: "log", text: "changed" },
+            ]);
+        } finally {
+            release();
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("lets a stop wait only so long for a command that began its change, then cuts it off", async () => {
+        expect(MOUNT_CONTROL_LIMITS.stopWaitMs).toBe(10_000);
+        const directory = await stateDirectory();
+        const { control, release, changing } = await holdingChange(
+            directory,
+            // Short here; 10 s in a mount.
+            { stopWaitMs: 200 }
+        );
+        try {
+            const record = readMountControl(directory)!;
+            const trust = runningError(
+                callMountControl(record, request("trust"), ignore)
+            );
+            await within(changing, "trust begins its change");
+            await within(control.stopServing(), "the stop's wait ends");
+            expect(await within(trust, "trust is cut off")).toBe(
+                `a mount is running for this directory (pid ${process.pid}); its control endpoint closed before peerbit-fs trust finished`
+            );
+        } finally {
+            release();
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("does not take a record copied from another state directory for its own, nor remove what that record names", async () => {
+        const base = await stateDirectory();
+        // On POSIX a path too long for a socket address: the first socket is
+        // under /tmp, where a record names what a mount there removes.
+        const first = path.join(base, windows ? "first" : "f".repeat(120));
+        const copy = path.join(base, "copy");
+        await fsp.mkdir(first);
+        await fsp.mkdir(copy);
+        const serving = await startMountControl({
+            directory: first,
+            cliVersion: CLI,
+            handle: async () => 11,
+        });
+        let next: Awaited<ReturnType<typeof startMountControl>> | undefined;
+        try {
+            // As a copy or a restore of the state directory leaves it.
+            await fsp.copyFile(
+                path.join(first, MOUNT_CONTROL_FILE),
+                path.join(copy, MOUNT_CONTROL_FILE)
+            );
+            await fsp.chmod(path.join(copy, MOUNT_CONTROL_FILE), 0o600);
+            expect(readMountControl(copy)).toBeUndefined();
+            next = await startMountControl({
+                directory: copy,
+                cliVersion: CLI,
+                handle: async () => 12,
+            });
+            for (const [directory, exitCode] of [
+                [first, 11],
+                [copy, 12],
+            ] as const) {
+                expect(
+                    await callMountControl(
+                        readMountControl(directory)!,
+                        request("status"),
+                        ignore
+                    )
+                ).toEqual({ reached: true, exitCode });
+            }
+        } finally {
+            await next?.close();
+            await serving.close();
+            await removeDirectory(base);
+        }
+    });
+
+    it.skipIf(windows)(
+        "keeps the socket directory a record of its own directory names while that record's process runs",
+        async () => {
+            const directory = await stateDirectory();
+            // A process that took the pid of a killed mount.
+            const named = fs.mkdtempSync("/tmp/pbfs-ctl-");
+            await fsp.writeFile(
+                path.join(directory, MOUNT_CONTROL_FILE),
+                JSON.stringify({
+                    protocol: 1,
+                    pid: process.pid,
+                    directory: identity(directory),
+                    endpoint: path.join(named, "socket"),
+                    token: "stale",
+                }),
+                { mode: 0o600 }
+            );
+            const control = await startMountControl({
+                directory,
+                cliVersion: CLI,
+                handle: async () => 0,
+            });
+            try {
+                expect(fs.existsSync(named)).toBe(true);
+            } finally {
+                await control.close();
+                await removeDirectory(named);
+                await removeDirectory(directory);
+            }
+        }
+    );
 
     it.skipIf(windows)(
         "puts the socket of a state directory whose path does not fit a socket address in an owner-only directory under /tmp, and removes it",
@@ -428,6 +749,7 @@ describe("mount control endpoint", () => {
                         {
                             protocol: 1,
                             pid: process.pid,
+                            directory: identity(base),
                             endpoint,
                             token: "a-token",
                         },
@@ -443,6 +765,7 @@ describe("mount control endpoint", () => {
                 const record: MountControlRecord = {
                     protocol: 1,
                     pid: process.pid,
+                    directory: identity(base),
                     endpoint,
                     token: "a-token",
                 };
@@ -639,13 +962,19 @@ type Printed = { method: "log" | "warn" | "error"; text: string };
 const PEERBIT_NOTICE =
     /^(Peer shutdown |Peerbit emitted a known |Peerbit fanout bootstrap )/;
 
-/** Runs a peerbit-fs command in this process: what it printed, and its exit code. */
-const run = async (...args: string[]) => {
+/**
+ * Runs a peerbit-fs command in this process: what it printed, without
+ * terminal escapes unless `raw`, and its exit code.
+ */
+const capture = async (args: string[], raw = false) => {
     const printed: Printed[] = [];
     const spies = (["log", "warn", "error"] as const).map((method) =>
         vi.spyOn(console, method).mockImplementation((...values) => {
-            const text = stripVTControlCharacters(values.map(String).join(" "));
-            if (!PEERBIT_NOTICE.test(text)) printed.push({ method, text });
+            const line = values.map(String).join(" ");
+            const text = stripVTControlCharacters(line);
+            if (!PEERBIT_NOTICE.test(text)) {
+                printed.push({ method, text: raw ? line : text });
+            }
         })
     );
     const saved = process.exitCode;
@@ -659,11 +988,459 @@ const run = async (...args: string[]) => {
     }
 };
 
+/** Runs a peerbit-fs command in this process: what it printed, and its exit code. */
+const run = (...args: string[]) => capture(args);
+
 /** The one line a command printed, parsed. */
 const json = (result: { printed: Printed[] }) => {
     expect(result.printed.map(({ method }) => method)).toEqual(["log"]);
     return JSON.parse(result.printed[0].text);
 };
+
+describe("a command a mount serves, on a stand-in for its filesystem", () => {
+    const ADDRESS = "zb2rhServedFilesystemAddress";
+    /** A writer key, as `peerbit-fs whoami` prints it. */
+    let key: string;
+
+    beforeAll(async () => {
+        const peer = await Peerbit.create();
+        try {
+            key = encodePublicSignKey(peer.identity.publicKey);
+        } finally {
+            await stopPeer(peer);
+        }
+    });
+
+    /** What the served commands call on the mount's filesystem. */
+    const standInFs = (calls: Record<string, unknown> = {}) => ({
+        address: ADDRESS,
+        localPublicKey: "a-local-key",
+        accessControlled: false,
+        bootstrapStatus: () => ({
+            phase: "converged",
+            pendingDocs: 0,
+            snapshotCoverageVerified: true,
+            writeReady: true,
+        }),
+        awaitWriteReady: async () => {},
+        awaitBootstrapConverged: async () => ({ verified: true }),
+        conflicts: async () => [],
+        namingConflicts: async () => [],
+        ...calls,
+    });
+
+    /**
+     * An endpoint in this process that runs requests as a mount does, on
+     * what `live()` returns: undefined while the filesystem is opening.
+     */
+    const serveLive = (
+        directory: string,
+        live: () => unknown,
+        cliVersion = CLI
+    ) =>
+        startMountControl({
+            directory,
+            cliVersion,
+            handle: (request, print, signal, beginChange) =>
+                serveMountRequest(
+                    live() as Parameters<typeof serveMountRequest>[0],
+                    request,
+                    print,
+                    signal,
+                    beginChange
+                ),
+        });
+
+    /** Resolves once `signal` aborted. */
+    const aborted = (signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => resolve());
+        });
+
+    /** Runs what promises that settled scheduled. */
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    const resolution = { writeReadyTimeoutMs: 120_000, assumeComplete: false };
+
+    it("refuses a command it does not serve, one for another filesystem, and any while the mount's filesystem is still opening", async () => {
+        const directory = await stateDirectory();
+        let live: unknown;
+        const control = await serveLive(directory, () => live);
+        try {
+            const record = readMountControl(directory)!;
+            const answer = (command: string, address = ADDRESS) =>
+                answers(
+                    control.endpoint!,
+                    requestLine(record, command, { address })
+                );
+            const refused = (reason: string) => [{ type: "refused", reason }];
+            expect(await answer("status")).toEqual(
+                refused(
+                    "it is still opening the filesystem: run the command again once it has"
+                )
+            );
+            live = { fsHandle: standInFs(), peerbit: {} };
+            for (const command of [
+                "whoami",
+                "snapshot",
+                "mount",
+                "__proto__",
+                "constructor",
+                "toString",
+            ]) {
+                expect(await answer(command)).toEqual(
+                    refused(`peerbit-fs ${command} does not run through it`)
+                );
+            }
+            expect(await answer("status", "zb2rhAnotherAddress")).toEqual(
+                refused(`it serves ${ADDRESS}, not zb2rhAnotherAddress`)
+            );
+        } finally {
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("ends a command's wait for write readiness once its client goes away, and never begins its change", async () => {
+        const directory = await stateDirectory();
+        const waits: (AbortSignal | undefined)[] = [];
+        const waiting = deferred();
+        const resolveConflict = vi.fn();
+        const live = {
+            peerbit: {},
+            fsHandle: standInFs({
+                bootstrapStatus: () => ({
+                    phase: "converged",
+                    pendingDocs: 0,
+                    snapshotCoverageVerified: true,
+                    writeReady: false,
+                }),
+                // Until it is aborted, as the library's wait without a
+                // write-ready replica.
+                awaitWriteReady: (options: { signal?: AbortSignal }) => {
+                    waits.push(options.signal);
+                    waiting.resolve();
+                    return new Promise((_, reject) =>
+                        options.signal?.addEventListener("abort", () =>
+                            reject(options.signal!.reason)
+                        )
+                    );
+                },
+                resolveConflict,
+            }),
+        };
+        const control = await serveLive(directory, () => live);
+        const client = net.createConnection(control.endpoint!);
+        client.on("error", ignore);
+        try {
+            client.write(
+                requestLine(readMountControl(directory)!, "resolve-conflict", {
+                    address: ADDRESS,
+                    path: "/a.txt",
+                    versionId: "version:a",
+                    json: false,
+                    ...resolution,
+                })
+            );
+            await within(waiting.promise, "the command waits");
+            client.destroy();
+            const [signal] = waits;
+            expect(signal).toBeInstanceOf(AbortSignal);
+            await within(aborted(signal!), "the wait ends");
+            await settle();
+            expect(resolveConflict).not.toHaveBeenCalled();
+        } finally {
+            client.destroy();
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("does not begin a change once its client went away", async () => {
+        const directory = await stateDirectory();
+        const waits: (AbortSignal | undefined)[] = [];
+        const checking = deferred();
+        let checked!: () => void;
+        const resolveConflict = vi.fn();
+        const live = {
+            peerbit: {},
+            fsHandle: standInFs({
+                awaitWriteReady: async (options: { signal?: AbortSignal }) => {
+                    waits.push(options.signal);
+                },
+                conflicts: async () => [{ path: "/a.txt" }],
+                // Its last check before the change, held.
+                stat: () => {
+                    checking.resolve();
+                    return new Promise((resolve) => {
+                        checked = () =>
+                            resolve({ headVersionIds: ["version:a"] });
+                    });
+                },
+                resolveConflict,
+            }),
+        };
+        const control = await serveLive(directory, () => live);
+        const client = net.createConnection(control.endpoint!);
+        client.on("error", ignore);
+        try {
+            client.write(
+                requestLine(readMountControl(directory)!, "resolve-conflict", {
+                    address: ADDRESS,
+                    path: "/a.txt",
+                    versionId: "version:a",
+                    json: false,
+                    ...resolution,
+                })
+            );
+            await within(checking.promise, "the command checks the heads");
+            client.destroy();
+            await within(aborted(waits[0]!), "the request is aborted");
+            checked();
+            await settle();
+            expect(resolveConflict).not.toHaveBeenCalled();
+        } finally {
+            client.destroy();
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    /** Each command that changes the filesystem, and its change. */
+    const CHANGES = [
+        {
+            command: "trust",
+            argv: () => ({ address: ADDRESS, publicKey: key }),
+            change: "authorizeWriter",
+            result: undefined,
+            calls: {},
+            first: "Writer trusted",
+        },
+        {
+            command: "revoke",
+            argv: () => ({ address: ADDRESS, publicKey: key }),
+            change: "revokeWriter",
+            result: undefined,
+            calls: { isTrustedWriter: async () => false },
+            first: "Writer revoked",
+        },
+        {
+            command: "resolve-conflict",
+            argv: () => ({
+                address: ADDRESS,
+                path: "/a.txt",
+                versionId: "version:a",
+                json: false,
+                ...resolution,
+            }),
+            change: "resolveConflict",
+            result: {
+                id: "version:resolved",
+                path: "/a.txt",
+                nodeId: "node:a",
+                parentVersionIds: ["version:a"],
+                size: 0n,
+                createdAt: 0n,
+            },
+            calls: {
+                conflicts: async () => [{ path: "/a.txt" }],
+                stat: async () => ({ headVersionIds: ["version:a"] }),
+            },
+            first: "Published content resolution for /a.txt",
+        },
+        {
+            command: "resolve-naming-conflict",
+            argv: () => ({
+                address: ADDRESS,
+                nodeId: "node:a",
+                action: "keep",
+                json: false,
+                ...resolution,
+            }),
+            change: "resolveNamingConflict",
+            result: { type: "kept" },
+            calls: {
+                namingConflicts: async () => [
+                    {
+                        type: "duplicate-name",
+                        nodeId: "node:a",
+                        path: "/a.txt",
+                        eventIds: ["event:a"],
+                    },
+                ],
+            },
+            first: "Processed naming action keep for node:a",
+        },
+        {
+            command: "gc",
+            argv: () => ({
+                address: ADDRESS,
+                immediateSweep: false,
+                dryRun: false,
+                json: false,
+            }),
+            change: "collectGarbage",
+            result: {
+                dryRun: false,
+                retiredVersions: 0,
+                compactedNamingEvents: 0,
+                purgedNodes: 0,
+                deletedChunks: 0,
+                reclaimedChunkBytes: 0,
+                segmentBlocksDeleted: 0,
+                reclaimedSegmentBytes: 0,
+                healedChunks: 0,
+                conflictedNodes: 0,
+                chunkCandidatesRecorded: 0,
+                purgeCandidatesRecorded: 0,
+                warnings: [],
+                damagedNodeIds: [],
+            },
+            calls: {},
+            first: "gc report",
+        },
+    ];
+
+    it.each(CHANGES)(
+        "lets a stop wait for $command once it began its change, and answers it",
+        async ({ command, argv, change, result, calls, first }) => {
+            const directory = await stateDirectory();
+            const changing = deferred();
+            let changed!: () => void;
+            const live = {
+                peerbit: {},
+                fsHandle: standInFs({
+                    ...calls,
+                    [change]: () => {
+                        changing.resolve();
+                        return new Promise((resolve) => {
+                            changed = () => resolve(result);
+                        });
+                    },
+                }),
+            };
+            const control = await serveLive(directory, () => live);
+            try {
+                const printed: MountControlPrint[] = [];
+                const answered = callMountControl(
+                    readMountControl(directory)!,
+                    request(command, argv()),
+                    (line) => printed.push(line)
+                );
+                await within(changing.promise, `${command} begins its change`);
+                let stopped = false;
+                const stopping = control.stopServing().then(() => {
+                    stopped = true;
+                });
+                await settle();
+                expect(stopped).toBe(false);
+                changed();
+                await within(stopping, "the stop has waited");
+                expect(await within(answered, `${command} answers`)).toEqual({
+                    reached: true,
+                    exitCode: null,
+                });
+                expect(printed[0]).toEqual({
+                    type: "console",
+                    method: "log",
+                    text: first,
+                });
+            } finally {
+                changed?.();
+                await control.close();
+                await removeDirectory(directory);
+            }
+        }
+    );
+
+    it("prints a command's output in the colour level of the terminal it was run from", async () => {
+        const directory = await stateDirectory();
+        const live = {
+            peerbit: {},
+            fsHandle: standInFs({
+                awaitBootstrapConverged: async () => ({ verified: false }),
+            }),
+        };
+        const control = await serveLive(
+            directory,
+            () => live,
+            await readCliPackageVersion()
+        );
+        const level = chalk.level;
+        const created = countPeerbits();
+        try {
+            for (const color of [0, 1] as const) {
+                chalk.level = color;
+                expect(
+                    await capture(
+                        ["naming-conflicts", ADDRESS, "--directory", directory],
+                        true
+                    )
+                ).toEqual({
+                    printed: [
+                        {
+                            method: "warn",
+                            text: new Chalk({ level: color }).yellow(
+                                "Naming conflict results reflect a settled local view without a verified full-replica bootstrap; do not treat absence as proof of no remote conflict."
+                            ),
+                        },
+                        { method: "log", text: "No naming conflicts" },
+                    ],
+                    exitCode: 0,
+                });
+            }
+            expect(created).not.toHaveBeenCalled();
+        } finally {
+            chalk.level = level;
+            created.mockRestore();
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
+    it("runs a command for a directory holding a copy of another directory's record on that directory, not through the other's mount", async () => {
+        const base = await stateDirectory();
+        const first = path.join(base, "first");
+        const copy = path.join(base, "copy");
+        await fsp.mkdir(first);
+        await fsp.mkdir(copy);
+        const served = vi.fn(async () => []);
+        const live = {
+            peerbit: {},
+            fsHandle: standInFs({ namingConflicts: served }),
+        };
+        const control = await serveLive(
+            first,
+            () => live,
+            await readCliPackageVersion()
+        );
+        // The command opens its own directory, which fails here at once.
+        const opened = vi
+            .spyOn(Peerbit, "create")
+            .mockRejectedValue(new Error("opened its own directory"));
+        try {
+            await fsp.copyFile(
+                path.join(first, MOUNT_CONTROL_FILE),
+                path.join(copy, MOUNT_CONTROL_FILE)
+            );
+            await fsp.chmod(path.join(copy, MOUNT_CONTROL_FILE), 0o600);
+            const outcome = await run(
+                "naming-conflicts",
+                ADDRESS,
+                "--directory",
+                copy
+            ).catch((error: Error) => error.message);
+            expect(outcome).toBe("opened its own directory");
+            expect(opened).toHaveBeenCalledWith({ directory: copy });
+            expect(served).not.toHaveBeenCalled();
+        } finally {
+            opened.mockRestore();
+            await control.close();
+            await removeDirectory(base);
+        }
+    });
+});
 
 describe("peerbit-fs commands for a directory a running mount holds", () => {
     const cliEntry = fileURLToPath(new URL("../bin.ts", import.meta.url));
@@ -686,6 +1463,8 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
     // A stand-in for the native adapter, no FUSE: it joins the mount's IPC,
     // says its pid and that it is ready, and is gone with the mount. As the
     // adapter, it exits 0 on SIGINT (it unmounted), and clears what it left.
+    // With PEERBIT_FS_TEST_HOLD_UNMOUNT it holds its unmount instead: on
+    // SIGINT it says so, and it exits 0 on SIGUSR2.
     const standInAdapter = `
         import { once } from "node:events";
         import { createConnection } from "node:net";
@@ -694,7 +1473,13 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
             process.stderr.write("stand-in adapter cleared " + option("--mountpoint") + "\\n");
             process.exit(0);
         }
-        process.on("SIGINT", () => process.exit(0));
+        if (process.env.PEERBIT_FS_TEST_HOLD_UNMOUNT) {
+            process.on("SIGINT", () => process.stderr.write("stand-in adapter holds its unmount\\n"));
+            process.on("SIGTERM", () => {});
+            process.on("SIGUSR2", () => process.exit(0));
+        } else {
+            process.on("SIGINT", () => process.exit(0));
+        }
         const ipc = (name) => import(new URL(name, ${JSON.stringify(libraryEsm.href)}).href);
         const { BoundedIpcByteReader } = await ipc("ipc-byte-reader.js");
         const v2 = await ipc("ipc-v2.js");
@@ -760,7 +1545,15 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
     };
 
     /** `peerbit-fs mount` of the machine's filesystem, with `args` added. */
-    const startMount = (machine: Machine, ...args: string[]) => {
+    const startMount = (machine: Machine, ...args: string[]) =>
+        startMountWith(machine, {}, ...args);
+
+    /** As startMount, with `env` added to the mount's and its adapter's. */
+    const startMountWith = (
+        machine: Machine,
+        env: NodeJS.ProcessEnv,
+        ...args: string[]
+    ) => {
         const child = spawn(
             process.execPath,
             [
@@ -781,7 +1574,10 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
                 path.join(machine.base, "adapter.mjs"),
                 ...args,
             ],
-            { cwd: cliDirectory, env: { ...process.env, FORCE_COLOR: "0" } }
+            {
+                cwd: cliDirectory,
+                env: { ...process.env, FORCE_COLOR: "0", ...env },
+            }
         );
         const output: string[] = [];
         const errors: string[] = [];
@@ -954,6 +1750,7 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
             expect(readMountControl(machine.directory)).toEqual({
                 protocol: 1,
                 pid: mount.child.pid,
+                directory: identity(machine.directory),
                 endpoint,
                 token: expect.any(String),
             });
@@ -1271,6 +2068,7 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
                     JSON.stringify({
                         protocol: 1,
                         pid: exited.pid,
+                        directory: identity(machine!.directory),
                         endpoint: staleTmp
                             ? path.join(staleTmp, "socket")
                             : "\\\\.\\pipe\\peerbit-fs-control-stale",
@@ -1308,6 +2106,178 @@ describe("peerbit-fs commands for a directory a running mount holds", () => {
                 // Left behind only when the mount did not remove it.
                 if (staleTmp) await removeDirectory(staleTmp);
             }
+        });
+
+        // Windows has no signal a test can send to one process: child.kill()
+        // and process.kill() terminate it.
+        it.skipIf(windows)(
+            "refuses commands from the start of its stop, while the stop is still under way",
+            async () => {
+                const mount = startMountWith(machine!, {
+                    PEERBIT_FS_TEST_HOLD_UNMOUNT: "1",
+                });
+                const endpoint = await serving(mount);
+                const adapterPid = Number(
+                    (
+                        await mount.line(
+                            mount.output,
+                            (line) => line.startsWith("stand-in adapter pid "),
+                            "the adapter says its pid"
+                        )
+                    ).slice("stand-in adapter pid ".length)
+                );
+                mount.child.stdin!.write("shutdown\n");
+                // The stop's first step is done: it is at the unmount.
+                await mount.line(
+                    mount.errors,
+                    (line) => line === "stand-in adapter holds its unmount",
+                    "the stop reaches the unmount"
+                );
+                const created = countPeerbits();
+                try {
+                    expect(
+                        await run(
+                            "status",
+                            machine!.address,
+                            "--json",
+                            "--directory",
+                            machine!.directory
+                        )
+                    ).toEqual({
+                        printed: [
+                            {
+                                method: "error",
+                                text: `a mount is running for this directory (pid ${mount.child.pid}); it refused peerbit-fs status: it is stopping`,
+                            },
+                        ],
+                        exitCode: 1,
+                    });
+                    expect(created).not.toHaveBeenCalled();
+                } finally {
+                    created.mockRestore();
+                    process.kill(adapterPid, "SIGUSR2");
+                }
+                expect(
+                    await within(mount.exited, "the mount exits", FENCE_MS),
+                    mount.errors.join("\n")
+                ).toBe(0);
+                expectNoEndpoint(machine!.directory, endpoint);
+            }
+        );
+
+        it.skipIf(windows)(
+            "removes its endpoint and exits 130 on a shutdown signal while it starts",
+            async () => {
+                const file = path.join(machine!.directory, MOUNT_CONTROL_FILE);
+                expect(fs.existsSync(file)).toBe(false);
+                // The record appears once the endpoint serves, early in the
+                // start; each change in the directory is checked, until the
+                // record is whole.
+                const watcher = fs.watch(machine!.directory);
+                const recorded = new Promise<void>((resolve) =>
+                    watcher.on("change", () => {
+                        if (readMountControl(machine!.directory)) resolve();
+                    })
+                );
+                // --require-fresh with no peer of this filesystem to compare
+                // with then holds the start in its wait for write readiness.
+                const mount = startMount(
+                    machine!,
+                    "--require-fresh",
+                    "--write-ready-timeout-ms",
+                    "600000"
+                );
+                try {
+                    await within(
+                        Promise.race([
+                            recorded,
+                            mount.exited.then((code) => {
+                                throw new Error(
+                                    `the mount exited ${code}\n${mount.errors.join("\n")}`
+                                );
+                            }),
+                        ]),
+                        "the endpoint serves",
+                        FENCE_MS
+                    );
+                } finally {
+                    watcher.close();
+                }
+                const record = readMountControl(machine!.directory)!;
+                expect(record.pid).toBe(mount.child.pid);
+                mount.child.kill("SIGINT");
+                expect(
+                    await within(mount.exited, "the mount exits", FENCE_MS),
+                    mount.errors.join("\n")
+                ).toBe(130);
+                expectNoEndpoint(machine!.directory, record.endpoint!);
+            }
+        );
+
+        it("removes its endpoint in the stop of a failed start, before its process exits, and hands back the shutdown signals", async () => {
+            // The mount runs in this process, which goes on after it failed.
+            const profile = path.join(machine!.base, "profile-in-process");
+            await fsp.mkdir(profile);
+            await fsp.writeFile(path.join(profile, "node-daemon.ndjson"), "");
+            const record = path.join(machine!.directory, MOUNT_CONTROL_FILE);
+            const signals = () =>
+                ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"].map((name) =>
+                    process.listenerCount(name)
+                );
+            const before = signals();
+            // Taken as the mount says it is write-ready, before it fails.
+            let starting: { record: boolean; signals: number[] } | undefined;
+            const spies = (["log", "warn", "error"] as const).map((method) =>
+                vi.spyOn(console, method).mockImplementation((...values) => {
+                    if (String(values[0]).startsWith("write readiness: ")) {
+                        starting = {
+                            record: fs.existsSync(record),
+                            signals: signals(),
+                        };
+                    }
+                })
+            );
+            const saved = process.exitCode;
+            try {
+                const failed = await runCli([
+                    "mount",
+                    machine!.address,
+                    path.join(machine!.base, "mnt"),
+                    "--directory",
+                    machine!.directory,
+                    "--peer",
+                    machine!.peer.getMultiaddrs()[0].toString(),
+                    "--native-adapter",
+                    path.join(machine!.base, "adapter.mjs"),
+                    "--mount-profile",
+                    profile,
+                ]).then(
+                    () => undefined,
+                    (error: Error) => error.message
+                );
+                expect(failed).toContain(
+                    "--mount-profile output already exists"
+                );
+            } finally {
+                for (const spy of spies) spy.mockRestore();
+                process.exitCode = saved;
+            }
+            expect(starting).toEqual({
+                record: true,
+                signals: before.map((count) => count + 1),
+            });
+            expect(fs.existsSync(record)).toBe(false);
+            if (!windows) {
+                expect(
+                    fs.existsSync(
+                        path.join(
+                            machine!.directory,
+                            MOUNT_CONTROL_SOCKET_DIRECTORY
+                        )
+                    )
+                ).toBe(false);
+            }
+            expect(signals()).toEqual(before);
         });
     });
 });
