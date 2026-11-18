@@ -480,6 +480,24 @@ On Linux and macOS, inode numbers are libfuse node ids that change after the
 kernel forgets an inode; git's default `core.checkStat` compares them, so
 `git status` can re-hash such files (correct, but slower).
 
+## Error codes
+
+A failed call returns the errno of the error name the daemon sent (`ENOENT`,
+`EEXIST`, `EACCES` and so on); a name the adapter does not know becomes `EIO`,
+and so does a failure with no name. These names reach callers too:
+
+| Name     | When                                                                   | Linux | macOS | Windows: errno -> WinFsp NTSTATUS -> Win32 -> Node                 |
+| -------- | ---------------------------------------------------------------------- | ----- | ----- | ------------------------------------------------------------------ |
+| `EXDEV`  | a rename the mount cannot make in place, such as across an ignore rule | 18    | 18    | 18 -> `STATUS_NOT_SAME_DEVICE` -> `ERROR_NOT_SAME_DEVICE` -> EXDEV |
+| `ENOSPC` | the disk under the daemon's store is full                              | 28    | 28    | 28 -> `STATUS_DISK_FULL` -> `ERROR_DISK_FULL` -> ENOSPC            |
+| `EPERM`  | the host refused the operation                                         | 1     | 1     | 1 -> `STATUS_ACCESS_DENIED` -> `ERROR_ACCESS_DENIED` -> EPERM      |
+| `EDQUOT` | a disk quota under the daemon's store is exhausted                     | 122   | 69    | sent as ENOSPC (Windows has no quota errno): 28 -> ENOSPC          |
+
+`mv`, file managers and most copy tools handle `EXDEV` by copying and
+deleting. On Windows `EACCES` also becomes `STATUS_ACCESS_DENIED`, so Node
+reports `EPERM` for both. An adapter built before these names existed reports
+them as `EIO`.
+
 ## Kernel caching and other peers' changes
 
 The adapter keeps no cache of its own. What the kernel caches decides how

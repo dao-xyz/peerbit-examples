@@ -347,7 +347,15 @@ export type SharedFsBackendErrorCode =
     | "EBADF"
     | "EROFS"
     | "ENAMETOOLONG"
-    | "EFBIG";
+    | "EFBIG"
+    /** A rename between two sides that cannot hold each other's entries. */
+    | "EXDEV"
+    /** The disk under the store or a local overlay is full. */
+    | "ENOSPC"
+    /** The host refused the operation. */
+    | "EPERM"
+    /** A disk quota under the store or a local overlay is exhausted. */
+    | "EDQUOT";
 
 export class SharedFsBackendError extends Error {
     constructor(
@@ -879,18 +887,27 @@ const alreadyExists = (path: string) =>
 const badHandle = (handle: number) =>
     new SharedFsBackendError("EBADF", `Unknown file handle: ${handle}`);
 
+/** A host ENOSPC or EDQUOT on `error` or its `cause`, else undefined. */
+const hostStorageCode = (error: unknown) => {
+    for (const candidate of [error, (error as { cause?: unknown })?.cause]) {
+        const code = (candidate as { code?: unknown } | undefined)?.code;
+        if (code === "ENOSPC" || code === "EDQUOT") return code;
+    }
+    return undefined;
+};
+
 /** Map library errors onto backend errno codes. */
 const toBackendError = (error: unknown): SharedFsBackendError => {
     if (error instanceof SharedFsBackendError) {
         return error;
     }
     if (error instanceof SharedFsError) {
-        // Artifact-ignore rejections surface as permission errors until
-        // the mount tier gains its local overlay; EXDEV has no slot in
-        // the adapter protocol yet either. Watch-layer errors never reach
-        // the mount path but the type union must stay total.
+        // An ignore rejection stays a permission error (a mount with a local
+        // overlay never sends an ignored path here); a rename across an
+        // ignore boundary is EXDEV, so tools copy instead. Watch-layer,
+        // timeout, close and GC-phase errors have no errno and stay EIO.
         const code: SharedFsBackendErrorCode =
-            error.code === "EIGNORED" || error.code === "EXDEV"
+            error.code === "EIGNORED"
                 ? "EACCES"
                 : error.code === "EWATCHLIMIT" ||
                     error.code === "ETIMEDOUT" ||
@@ -900,8 +917,10 @@ const toBackendError = (error: unknown): SharedFsBackendError => {
                   : error.code;
         return new SharedFsBackendError(code, error.message);
     }
+    // Any other error: a host ENOSPC or EDQUOT (on the error or its `cause`)
+    // under the store is reported as such; everything else stays EIO.
     return new SharedFsBackendError(
-        "EIO",
+        hostStorageCode(error) ?? "EIO",
         error instanceof Error ? error.message : String(error)
     );
 };

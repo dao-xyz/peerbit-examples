@@ -189,6 +189,13 @@ collapses duplicates is not required to add a separate duplicate detector.
 Receivers MUST decode and validate the entire frame before dispatching an
 operation.
 
+An error response's `error.code`, when present, is a name from the mount
+backend's error vocabulary: `ENOENT`, `EAGAIN`, `EIO`, `EEXIST`, `EISDIR`,
+`ENOTDIR`, `ENOTEMPTY`, `EINVAL`, `EACCES`, `EBADF`, `EROFS`, `ENAMETOOLONG`,
+`EFBIG`, `EXDEV`, `ENOSPC`, `EPERM` and `EDQUOT`. An adapter maps a missing
+code, or a name it does not know, to `EIO`, so an older adapter reports a newer
+name as `EIO`. `error.message` is diagnostic text only.
+
 For a `write` request, the byte argument in metadata is exactly
 `{"$bytes":null}` and the raw bytes are the frame body. For a successful `read`
 response, `result` is exactly `{"$bytes":null}` and the raw result is the body.
