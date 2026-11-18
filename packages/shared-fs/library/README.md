@@ -1454,7 +1454,8 @@ failures.
 The first adapter path is intentionally experimental:
 
 - Linux requires FUSE/libfuse plus the external adapter.
-- macOS requires macFUSE plus the external adapter.
+- macOS requires macFUSE plus the external adapter. The adapter refuses
+  FUSE-T; `getNativeMountRefusal()` says so before a mount starts.
 - Windows requires WinFsp plus the external adapter.
 - `packages/shared-fs/native` provides the experimental external native adapter
   binary using cgofuse for Linux FUSE, macFUSE, and WinFsp.

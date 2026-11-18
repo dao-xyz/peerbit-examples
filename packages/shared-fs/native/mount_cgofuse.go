@@ -33,7 +33,18 @@ type peerbitFS struct {
 // host needs for d_type.
 const requestReaddirStats = runtime.GOOS == "windows"
 
+// runNativeMount checks the FUSE runtime with these. A test replaces them to
+// run it as on a Mac with only FUSE-T.
+var (
+	mountGOOS         = runtime.GOOS
+	fuseLibraryExists = pathExists
+)
+
 func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mountProfiler) error {
+	// Refuse an unsupported FUSE runtime before connecting or mounting.
+	if err := nativeRuntimeError(mountGOOS, fuseLibraryExists); err != nil {
+		return err
+	}
 	fs := &peerbitFS{
 		client:  newIPCClient(endpoint, ipcClientOptions{token: token, profile: profile}),
 		debug:   debug,
@@ -59,8 +70,7 @@ func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mou
 	host := fuse.NewFileSystemHost(fs)
 	host.SetCapOpenTrunc(true)
 	host.SetCapReaddirPlus(requestReaddirStats)
-	fuseT := runtime.GOOS == "darwin" && darwinLoadsFuseT(pathExists)
-	options := nativeMountOptions(runtime.GOOS, fuseT, debug)
+	options := nativeMountOptions(runtime.GOOS, debug)
 	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
@@ -149,8 +159,8 @@ func (fs *peerbitFS) Init() {
 	fs.profile.holdShutdownSignals()
 	fs.debugf("fuse init")
 	fs.ready.Do(func() {
-		// Report ready only once the mount is attached, off the callback
-		// thread: FUSE-T may attach it only after Init returns.
+		// Report ready only once the mount is attached (see mountWatcher),
+		// off the callback thread so that Init returns first.
 		go func() {
 			if err := fs.mounted.wait(); err != nil {
 				fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native could not confirm the mount is attached: %v\n", err)

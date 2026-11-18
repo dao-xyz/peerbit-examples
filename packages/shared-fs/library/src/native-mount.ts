@@ -136,6 +136,22 @@ export const getNativeMountSupport = async (
     };
 };
 
+/**
+ * Why the native adapter would refuse to start on this host, if it would:
+ * on macOS, FUSE-T without macFUSE. Cheap enough to check before opening a
+ * filesystem; getNativeMountSupport reports every missing prerequisite.
+ * `platform` and `pathExists` default to this host's.
+ */
+export const getNativeMountRefusal = async (
+    options: {
+        platform?: NodeJS.Platform;
+        pathExists?: (path: string) => Promise<boolean>;
+    } = {}
+): Promise<string | undefined> =>
+    (options.platform ?? process.platform) === "darwin"
+        ? (await detectMacFuseRuntime(options.pathExists ?? pathExists)).refusal
+        : undefined;
+
 export const unmountNativeMountpoint = async (mountpoint: string) => {
     if (process.platform === "win32") {
         throw new NativeMountUnavailableError(

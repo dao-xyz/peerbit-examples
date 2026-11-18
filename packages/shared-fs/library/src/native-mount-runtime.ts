@@ -1,17 +1,12 @@
-// The adapter's cgofuse loads the first of these libraries that exists
-// (fuse/host_cgo.go), so a host with both runtimes mounts through macFUSE.
-const macFuseRuntimeLibraries = [
-    { library: "/usr/local/lib/libfuse.2.dylib", runtime: "macFUSE" },
-    { library: "/usr/local/lib/libosxfuse.2.dylib", runtime: "macFUSE" },
-    { library: "/usr/local/lib/libfuse-t.dylib", runtime: "FUSE-T" },
-] as const;
-
-export type MacFuseRuntime =
-    (typeof macFuseRuntimeLibraries)[number]["runtime"];
+/** The adapter's own startup error on a Mac with FUSE-T but no macFUSE. */
+export const FUSE_T_UNSUPPORTED =
+    "FUSE-T is not supported: install macFUSE (brew install --cask macfuse) to mount on macOS; FUSE-T can stay installed. Found FUSE-T's /usr/local/lib/libfuse-t.dylib but not macFUSE's /usr/local/lib/libfuse.2.dylib or /usr/local/lib/libosxfuse.2.dylib.";
 
 export type MacFuseRuntimeStatus = {
-    /** The runtime the adapter will load, if any. */
-    runtime?: MacFuseRuntime;
+    /** Set when the adapter will mount through macFUSE. */
+    runtime?: "macFUSE";
+    /** Set when the adapter would refuse to mount: FUSE-T without macFUSE. */
+    refusal?: string;
     missing: string[];
     notes: string[];
 };
@@ -19,19 +14,20 @@ export type MacFuseRuntimeStatus = {
 export const detectMacFuseRuntime = async (
     pathExists: (path: string) => Promise<boolean>
 ): Promise<MacFuseRuntimeStatus> => {
-    const installed = new Set<MacFuseRuntime>();
-    for (const { library, runtime } of macFuseRuntimeLibraries) {
-        if (await pathExists(library)) {
-            installed.add(runtime);
-        }
-    }
-    if (installed.has("macFUSE")) {
+    // The adapter's cgofuse loads the first of these libraries that exists
+    // (fuse/host_cgo.go), and the adapter refuses to mount through FUSE-T
+    // (native/mount_options.go), so only macFUSE counts.
+    const macFuse =
+        (await pathExists("/usr/local/lib/libfuse.2.dylib")) ||
+        (await pathExists("/usr/local/lib/libosxfuse.2.dylib"));
+    const fuseT = await pathExists("/usr/local/lib/libfuse-t.dylib");
+    if (macFuse) {
         return {
             runtime: "macFUSE",
             missing: [],
             notes: [
                 "macOS native mounts will use macFUSE, whose kernel extension must be approved in System Settings.",
-                ...(installed.has("FUSE-T")
+                ...(fuseT
                     ? [
                           "FUSE-T is also installed but unused: the adapter loads macFUSE first.",
                       ]
@@ -39,19 +35,14 @@ export const detectMacFuseRuntime = async (
             ],
         };
     }
-    if (installed.has("FUSE-T")) {
-        return {
-            runtime: "FUSE-T",
-            missing: [],
-            notes: [
-                "macOS native mounts will use FUSE-T, which the adapter loads when macFUSE is absent; shared-fs CI does not test FUSE-T.",
-            ],
-        };
-    }
-    return {
-        missing: ["macFUSE"],
-        notes: [
-            "macOS native mounts need macFUSE, a kernel extension that must be approved in System Settings.",
-        ],
-    };
+    const notes = [
+        "macOS native mounts need macFUSE, a kernel extension that must be approved in System Settings.",
+    ];
+    return fuseT
+        ? {
+              refusal: FUSE_T_UNSUPPORTED,
+              missing: ["macFUSE"],
+              notes: [FUSE_T_UNSUPPORTED, ...notes],
+          }
+        : { missing: ["macFUSE"], notes };
 };

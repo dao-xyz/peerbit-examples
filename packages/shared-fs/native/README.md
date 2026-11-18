@@ -10,6 +10,13 @@ filesystem through [cgofuse](https://github.com/winfsp/cgofuse), which supports:
 - macOS: macFUSE
 - Windows: WinFsp
 
+macOS mounts require macFUSE. On a Mac with FUSE-T but not macFUSE, cgofuse
+would load FUSE-T, so the adapter refuses to start there, naming the libraries
+it checked, and `peerbit-fs mount` refuses before it opens the filesystem.
+FUSE-T can stay installed next to macFUSE, which cgofuse loads first.
+Shared-fs does not support FUSE-T: it is licensed for non-commercial use
+only, and CI does not test it.
+
 Normal CLI users should install a prebuilt adapter:
 
 ```bash
@@ -377,7 +384,7 @@ Per platform:
   scripts and hooks. cgofuse does not cache symlinks, so each traversal of a
   link costs one `readlink` round trip.
 - macOS (macFUSE) supports the same operations; `chflags` and creation-time
-  updates succeed without storing anything. FUSE-T is untested.
+  updates succeed without storing anything.
 - Windows (WinFsp) shows directories as `0777` and files as `0666` and never
   sets the exec bit: `chmod` (an ACL edit) and the create mode are ignored
   there. Editing a POSIX peer's executable in place keeps its exec bit; an
@@ -487,11 +494,6 @@ macOS (macFUSE) keeps macFUSE's defaults: names and attributes are cached for
 peers change can be up to 1 s stale, and names they create appear at once. A
 create within 1 s of another peer deleting the same name may fail with
 `ENOENT`; this is not measured.
-
-When macFUSE is absent, cgofuse loads FUSE-T instead. Shared-fs does not test
-FUSE-T. FUSE-T serves the mount through a local NFS server whose client caches
-attributes for 5 to 60 s, which in a one-off probe hid other peers' changes for
-up to 18 s, so the adapter mounts it with `-o noattrcache`.
 
 Windows (WinFsp) keeps WinFsp's own caching; the adapter sets no cache options
 there. A two-mount probe on hosted `windows-2025` and `windows-2022` runners
