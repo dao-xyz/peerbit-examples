@@ -326,15 +326,15 @@ however that process ended:
   process that exits or is killed, so when that connection ends the adapter
   unmounts, prints why, and exits with status 1. Nothing polls: the adapter
   blocks reading it.
-- On Linux, `peerbit-fs mount` passes its process id in
-  `PEERBIT_SHARED_FS_PARENT_PID`. The adapter asks the kernel for SIGHUP when
-  its parent exits (`PR_SET_PDEATHSIG`) and then checks that its parent is
-  that process. Another parent, a wrapper that did not `exec` the adapter
-  (a shell script, `sudo`, `strace -f`) or a `peerbit-fs` that exited before
-  the request, gets a one-line note on stderr and no refusal: the signal then
-  watches that parent, and the IPC connections still end the mount (they fail
-  at once when `peerbit-fs` is gone). Without the variable (an adapter started
-  by hand) it skips this.
+- `peerbit-fs mount` passes its process id in `PEERBIT_SHARED_FS_PARENT_PID`.
+  On Linux the adapter asks the kernel for SIGHUP when its parent exits
+  (`PR_SET_PDEATHSIG`) and then checks that its parent is that process.
+  Another parent, a wrapper that did not `exec` the adapter (a shell script,
+  `sudo`, `strace -f`) or a `peerbit-fs` that exited before the request, gets
+  a one-line note on stderr and no refusal: the signal then watches that
+  parent, and the IPC connections still end the mount (they fail at once when
+  `peerbit-fs` is gone). Without the variable (an adapter started by hand) it
+  skips this.
 - SIGHUP, from that request or a closed terminal, unmounts and exits with
   status 0, as SIGINT and SIGTERM do.
 - On Windows, Node starts the adapter in a job object that terminates it
@@ -349,11 +349,12 @@ macFUSE in CI). The adapter mounts with the source name (fsname)
 `peerbit-shared-fs`, and on Linux also the subtype, so the mount table shows
 `type fuse.peerbit-shared-fs`. Before mounting, it unmounts a disconnected
 mount at its mountpoint only when the mount table shows a mount from
-`peerbit-shared-fs` of that type (macOS: `macfuse`) by the same user: on
-Linux with `fusermount3 -u` (or `fusermount`), then lazily with `-u -z`; on
-macOS with `unmount`, then a forced one. It leaves a live mount alone. At a
-disconnected mount it cannot prove an adapter of its user left, or fails to
-unmount, it says what it found, names the command to run, and does not mount.
+`peerbit-shared-fs` of that type (macOS: `macfuse` or `osxfuse`) by the same
+user: on Linux with `fusermount3 -u` (or `fusermount`), then lazily with
+`-u -z`; on macOS with `unmount`, then a forced one. It leaves a live mount
+alone. At a disconnected mount it cannot prove an adapter of its user left, or
+fails to unmount, it says what it found, names the command to run, and does
+not mount.
 
 After the adapter exits other than with status 0 (it did not unmount), and
 not on Windows, `peerbit-fs mount` runs

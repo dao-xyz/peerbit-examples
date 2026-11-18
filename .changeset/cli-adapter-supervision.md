@@ -10,7 +10,7 @@ such as systemd or launchd only has to watch `mount`:
   last 20 stderr lines, and the mount stops as on a first shutdown request:
   open files are saved and persist-on-exit runs. `mount` then exits 70; a
   failed step's 1 is kept over 70, and 70 over 75 and 130. Before, `mount`
-  kept running with nothing mounted.
+  kept running behind a dead mount.
 - On Linux and macOS that stop first unmounts the disconnected mount the
   killed adapter left, which failed with `Transport endpoint is not connected`
   on Linux, but only when the mount table shows a mount that a peerbit-fs
