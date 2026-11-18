@@ -391,6 +391,9 @@ if [ -n "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ]; then
   # Mirrors nativeMountOptions in packages/shared-fs/native/mount_options.go.
   if [ "$(uname -s)" = "Linux" ]; then
     benchmark_args+=(--mount-option "-o" --mount-option "entry_timeout=0.1,attr_timeout=0,negative_timeout=0")
+    benchmark_args+=(--mount-option "-o" --mount-option "fsname=peerbit-shared-fs,subtype=peerbit-shared-fs")
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    benchmark_args+=(--mount-option "-o" --mount-option "fsname=peerbit-shared-fs")
   fi
   if [ "${PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG:-}" = "1" ]; then
     benchmark_args+=(--mount-option "-d")

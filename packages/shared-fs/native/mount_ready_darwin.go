@@ -8,11 +8,6 @@ import (
 	"syscall"
 )
 
-// mntNoWait is MNT_NOWAIT from <sys/mount.h>: getfsstat answers from the
-// kernel's mount table without asking each filesystem, this one included, for
-// fresh statistics.
-const mntNoWait = 2
-
 // mountWatcher reports when the mountpoint is attached, so the ready line
 // never precedes the mount. macFUSE's Init follows the kernel mount, so its
 // wait returns at once; the watcher guards a runtime that calls Init earlier,
@@ -66,37 +61,14 @@ func (w *mountWatcher) wait() error {
 }
 
 func isMountedAt(path string) (bool, error) {
-	for {
-		count, err := syscall.Getfsstat(nil, mntNoWait)
-		if err != nil {
-			return false, fmt.Errorf("getfsstat: %w", err)
-		}
-		// Leave room for mounts added between the two calls; a full buffer
-		// means the table grew past it, so read it again.
-		mounts := make([]syscall.Statfs_t, count+8)
-		n, err := syscall.Getfsstat(mounts, mntNoWait)
-		if err != nil {
-			return false, fmt.Errorf("getfsstat: %w", err)
-		}
-		if n == len(mounts) {
-			continue
-		}
-		for i := range mounts[:n] {
-			if cString(mounts[i].Mntonname[:]) == path {
-				return true, nil
-			}
-		}
-		return false, nil
+	mounts, err := darwinMounts()
+	if err != nil {
+		return false, err
 	}
-}
-
-func cString(value []int8) string {
-	bytes := make([]byte, 0, len(value))
-	for _, c := range value {
-		if c == 0 {
-			break
+	for i := range mounts {
+		if cString(mounts[i].Mntonname[:]) == path {
+			return true, nil
 		}
-		bytes = append(bytes, byte(c))
 	}
-	return string(bytes)
+	return false, nil
 }
