@@ -591,12 +591,12 @@ unmounting the disconnected mount the adapter left (see below). An adapter
 stopped from outside, by `peerbit-fs unmount` or `fusermount -u`/`umount`,
 exits 0: `mount` says so and stops the same way.
 
-A second request aborts the wait while it runs (the list is printed, then
-`mount` exits at once, without stopping Peerbit) and otherwise exits at once.
-One within 100 ms of the last is taken for the copy of a Ctrl-C that npm, pnpm
-and npx pass on: it only prints a hint. Windows has no SIGTERM: `taskkill` and
-`child.kill()` skip all this, so send `shutdown`; a closed console window
-leaves about 10 s.
+`mount` exits as soon as its stop is done. A second request aborts the wait
+while it runs (the list is printed, then `mount` exits at once, without
+stopping Peerbit) and otherwise exits at once. One within 100 ms of the last
+is taken for the copy of a Ctrl-C that npm, pnpm and npx pass on: it only
+prints a hint. Windows has no SIGTERM: `taskkill` and `child.kill()` skip all
+this, so send `shutdown`; a closed console window leaves about 10 s.
 
 Exit codes: 0 stopped; 1 failed, or an open file could not be saved
 (`persist-on-exit: unsaved {"path":...}`); 70 the adapter exited on its own;

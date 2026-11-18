@@ -28,6 +28,9 @@ such as systemd or launchd only has to watch `mount`:
   Linux the kernel also sends it SIGHUP when its parent exits (a wrapper
   script given as `--native-adapter` should start it with `exec`). On Windows,
   Node already ends the adapter with `mount`, and WinFsp removes the drive.
+- `mount` exits as soon as its stop is done, about a second sooner than
+  before, and a shutdown request that comes after the stop exits at once with
+  the exit code already set.
 
 The adapter changes reach users through this CLI version's adapter release
 (`shared-fs-native-v<version>`). No wire or storage format changes.

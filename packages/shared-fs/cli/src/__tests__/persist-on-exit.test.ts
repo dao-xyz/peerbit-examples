@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
     FileVersion,
@@ -17,6 +17,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reportAdapterExit } from "../external-native-adapter.js";
 import {
+    exitOnceFlushed,
     persistOnExit,
     runCli,
     stopMountSession,
@@ -303,11 +304,67 @@ describe("mount shutdown requests", () => {
 
         stop.release();
         await stop.stopped;
+        // The signal listeners stay, for a request after the stop; stdin is
+        // let go.
         for (const name of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
-            expect(host.listenerCount(name), name).toBe(0);
+            expect(host.listenerCount(name), name).toBe(1);
         }
         expect(stop.input.listenerCount("data")).toBe(0);
         expect(stop.input.isPaused()).toBe(true);
+    });
+
+    it("exits at once on a request after the stop settled, with the exit code set", async () => {
+        // An adapter's exit set 70 and the stop is done, but timers the stop
+        // left keep the process: a Ctrl-C then exits with 70, not by SIGINT.
+        const host = fakeHost();
+        const stop = pendingStop(host);
+        host.emit("SIGTERM");
+        process.exitCode = 70;
+        stop.release();
+        await stop.stopped;
+        expect(host.exit).not.toHaveBeenCalled();
+        host.ms += 1_000;
+        host.emit("SIGINT");
+        expect(host.exit).toHaveBeenLastCalledWith(70);
+        // A stop that failed: exit 1.
+        const failing = fakeHost();
+        const failed = waitForTermination(
+            async () => {
+                process.exitCode = 1;
+                throw new Error("close failed");
+            },
+            failing as any,
+            new PassThrough()
+        );
+        failing.emit("SIGHUP");
+        await expect(failed).rejects.toThrow("close failed");
+        failing.ms += 1_000;
+        failing.emit("SIGTERM");
+        expect(failing.exit).toHaveBeenLastCalledWith(1);
+    });
+
+    it("exits with the exit code set once stdout and stderr have written what they hold", async () => {
+        const host = fakeHost();
+        const held: (() => void)[] = [];
+        const slow = () =>
+            new Writable({
+                write: (_chunk, _encoding, done) => void held.push(done),
+            });
+        const [stdout, stderr] = [slow(), slow()];
+        stdout.write("persist-on-exit: 5 entries acknowledged in 3 ms\n");
+        process.exitCode = 75;
+        exitOnceFlushed(host as any, [stdout, stderr]);
+        await settle();
+        // The line, then each stream's empty write.
+        let writes = 0;
+        while (held.length) {
+            expect(host.exit, `after ${writes} writes`).not.toHaveBeenCalled();
+            held.shift()!();
+            writes++;
+            await settle();
+        }
+        expect(writes).toBe(3);
+        expect(host.exit).toHaveBeenCalledExactlyOnceWith(75);
     });
 
     it("exits at once on a second request outside the wait, with the exit code set", async () => {
@@ -1209,6 +1266,8 @@ describe("peerbit-fs mount as a process", () => {
         import.meta.url
     );
     // Windows cannot spawn a script: the mount starts a .mjs adapter with node.
+    // A timer that outlives the stop, as one libp2p's stop starts does (1 s):
+    // mount exits once the stop is done, without waiting for it.
     const scriptAdapters = `data:text/javascript,${encodeURIComponent(`
         import childProcess from "node:child_process";
         import { syncBuiltinESMExports } from "node:module";
@@ -1218,6 +1277,7 @@ describe("peerbit-fs mount as a process", () => {
                 ? spawn(process.execPath, [command, ...args], options)
                 : spawn(command, args, options);
         syncBuiltinESMExports();
+        setTimeout(() => {}, 10 * 60_000);
     `)}`;
     // A stand-in for the native adapter, no FUSE: it writes through the
     // mount's IPC as an adapter does, leaves /open.txt open, then is ready.

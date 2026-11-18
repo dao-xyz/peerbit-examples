@@ -461,12 +461,13 @@ const COPY_MS = 100;
 // Shutdown requests: SIGINT, SIGTERM, SIGBREAK, SIGHUP and a `shutdown` line
 // on a stdin that is not a terminal. The first runs `stop`. A copy is
 // ignored, with a hint; any other request aborts the persist-on-exit wait
-// while it runs, and otherwise exits at once. `ended` settles when the mount
-// ends on its own (its adapter exited): that runs `stop` as a first request
-// does, unless one came first.
+// while it runs, and otherwise exits at once, also once `stop` has settled
+// (the signal listeners stay until the process exits). `ended` settles when
+// the mount ends on its own (its adapter exited): that runs `stop` as a first
+// request does, unless one came first.
 export const waitForTermination = (
     stop: (shutdown: MountShutdown) => Promise<void>,
-    host: Pick<NodeJS.Process, "on" | "off" | "exit" | "uptime"> = process,
+    host: Pick<NodeJS.Process, "on" | "exit" | "uptime"> = process,
     input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
     ended?: Promise<unknown>
 ) =>
@@ -498,7 +499,6 @@ export const waitForTermination = (
             stop(shutdown)
                 .finally(() => {
                     clearInterval(keepAlive);
-                    for (const name of signals) host.off(name, request);
                     input.off("data", onData).pause();
                 })
                 .then(resolve, reject);
@@ -511,6 +511,20 @@ export const waitForTermination = (
         if (!input.isTTY) input.on("data", onData);
         void ended?.then(() => last < 0 && request(), ignore);
     });
+
+/**
+ * Exits with the exit code set once each stream has written what it holds.
+ * A stopped mount does not wait for the timers Peerbit's stop leaves, which
+ * kept it about a second longer.
+ */
+export const exitOnceFlushed = (
+    host: Pick<NodeJS.Process, "exit"> = process,
+    streams: NodeJS.WritableStream[] = [process.stdout, process.stderr]
+) => {
+    let pending = streams.length;
+    for (const stream of streams)
+        stream.write("", () => --pending || host.exit(process.exitCode ?? 0));
+};
 
 /** Unacknowledged paths listed one per line; one more line counts the rest. */
 const LISTED_PATHS = 200;
@@ -1894,6 +1908,7 @@ export const createCliParser = (args: string[]) => {
                     process.stdin,
                     adapterExited
                 );
+                exitOnceFlushed();
             }
         )
         .command(
