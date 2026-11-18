@@ -34,11 +34,36 @@ import {
 
 /**
  * Give-up bounds: a step that is not under test (a join, a reconnect), and
- * the fence of a test that expects it to finish. A test's bounds sum below
- * vitest's 120 s, so a stuck step fails with its own label.
+ * a fence (on Windows, a fence that must deliver everything uses
+ * SUCCESS_FENCE_MS instead). A test's bounds sum below its vitest timeout,
+ * so a stuck step fails with its own label.
  */
 const STEP_MS = 20_000;
 const FENCE_MS = 30_000;
+
+/**
+ * The fence of a test that expects it to succeed (exit 0), with the
+ * receiver rejoining inside it. Until it has the receipts, the writer
+ * sends the receiver all the unconfirmed heads again about every 0.3 s,
+ * and the receiver writes the coordinate row of every head in every copy,
+ * also of heads it already holds, mostly one durable commit per row.
+ * Those commits are synchronous: they hold the event loop, which writer
+ * and receiver share here, timers included, and no receipt goes out until
+ * they end. Windows CI took 25 s of a 30 s fence for 300 entries, and once
+ * gave up before the first batch of 100 was fully confirmed. Linux and
+ * macOS CI took 8 to 13 s for 1,500.
+ *
+ * 120 s on Windows is interim, until that duplicate work goes away; then
+ * back to FENCE_MS. Emulated on macOS, with fsyncs slowed so the writes
+ * take as long as Windows CI's slowest (38.6 s), the fence took 40 to
+ * 96 s, and it passed with writes about 1.25 times as slow. At about 1.55
+ * times, the receiver held the event loop for about 5 minutes and the
+ * test failed after about 395 s: no fence covers that.
+ */
+const SUCCESS_FENCE_MS = process.platform === "win32" ? 120_000 : FENCE_MS;
+
+/** vitest's 120 s, plus what a success fence adds to FENCE_MS. */
+const SUCCESS_TEST_MS = 120_000 + SUCCESS_FENCE_MS - FENCE_MS;
 
 /**
  * Files in the many-files fence test. Windows CI saves to durable stores
@@ -665,22 +690,55 @@ describe("mount --persist-on-exit over real TCP", () => {
         );
         return {
             // The fence, then Peerbit stops.
-            stopped: within(stopped, "the writer stops", FENCE_MS + STEP_MS),
+            stopped: within(
+                stopped,
+                "the writer stops",
+                Math.max(options.persistTimeoutMs, FENCE_MS) + STEP_MS
+            ),
             host,
             input,
         };
     };
 
-    /** Start a stopped replica again from its directory; it dials `to`. */
-    const rejoin = async (directory: string, address: string, to: Peerbit) => {
+    /** Entries in `handle`'s log, or null once it is closed. */
+    const logLength = (handle: SharedFsHandle) => {
+        try {
+            return handle.program.entries.log.log.length;
+        } catch {
+            return null;
+        }
+    };
+
+    /** When a rejoin started and each of its steps ended. */
+    type RejoinTimes = {
+        started?: number;
+        created?: number;
+        dialed?: number;
+        opened?: number;
+    };
+
+    /**
+     * Start a stopped replica again from its directory; it dials `to`.
+     * Its steps' times go to `at`.
+     */
+    const rejoin = async (
+        directory: string,
+        address: string,
+        to: Peerbit,
+        at: RejoinTimes = {}
+    ) => {
+        at.started = performance.now();
         const peer = await Peerbit.create({
             directory,
             libp2p: { addresses: { listen: ["/ip4/127.0.0.1/tcp/0"] } },
         });
         live.add(peer);
+        at.created = performance.now();
         await peer.dial(to.getMultiaddrs());
-        await open(peer, "receiver", address);
-        return peer;
+        at.dialed = performance.now();
+        const handle = await open(peer, "receiver", address);
+        at.opened = performance.now();
+        return { peer, handle };
     };
 
     /** Reopen a stopped replica alone, offline, from its own directory. */
@@ -698,182 +756,259 @@ describe("mount --persist-on-exit over real TCP", () => {
         });
     };
 
-    it(`exits 0 only once another replica holds all ${MANY_FILES} files, read there after the writer is gone`, async () => {
-        const writer = await createPeer("writer");
-        const receiver = await createPeer("receiver");
-        await writer.peer.dial(receiver.peer.getMultiaddrs());
-        const writerFs = await open(writer.peer, "writer");
-        const address = writerFs.address;
-        await open(receiver.peer, "receiver", address);
-        await untilReplicaSeen(writerFs);
-        // The receiver is away while the files are written: without the
-        // fence none of them would reach it before the writer stops.
-        await stop(receiver.peer);
+    it(
+        `exits 0 only once another replica holds all ${MANY_FILES} files, read there after the writer is gone`,
+        { timeout: SUCCESS_TEST_MS },
+        async ({ signal }) => {
+            const writer = await createPeer("writer");
+            const receiver = await createPeer("receiver");
+            await writer.peer.dial(receiver.peer.getMultiaddrs());
+            const writerFs = await open(writer.peer, "writer");
+            const address = writerFs.address;
+            await open(receiver.peer, "receiver", address);
+            await untilReplicaSeen(writerFs);
+            // The receiver is away while the files are written: without the
+            // fence none of them would reach it before the writer stops.
+            await stop(receiver.peer);
 
-        const backend = createSharedFsMountBackend(writerFs);
-        const writeStarted = performance.now();
-        // The last file stays open with its bytes buffered: the drain
-        // commits it, the fence then delivers it.
-        await writeThroughMount(backend, MANY_FILES, { leaveLastOpen: true });
-        const writeMs = performance.now() - writeStarted;
-        // Printed before the fence, so a run that times out still says how
-        // long the writes took.
-        console.log(
-            `persist-on-exit ${MANY_FILES} files written in ${Math.round(writeMs)} ms`
-        );
+            const backend = createSharedFsMountBackend(writerFs);
+            const writeStarted = performance.now();
+            // The last file stays open with its bytes buffered: the drain
+            // commits it, the fence then delivers it.
+            await writeThroughMount(backend, MANY_FILES, {
+                leaveLastOpen: true,
+            });
+            const writeMs = performance.now() - writeStarted;
+            // Printed before the fence, so a run that times out still says how
+            // long the writes took.
+            console.log(
+                `persist-on-exit ${MANY_FILES} files written in ${Math.round(writeMs)} ms`
+            );
 
-        // The Windows path: a `shutdown` line on stdin.
-        const { stopped, input } = shutdownOnRequest(
-            { peer: writer.peer, handle: writerFs },
-            backend,
-            { persistOnExit: true, persistTimeoutMs: FENCE_MS }
-        );
-        input.write("shutdown\n");
-        let writerStopped = false;
-        void stopped.then(
-            () => (writerStopped = true),
-            () => {}
-        );
-        await Promise.race([untilLine(/waiting up to/), stopped]);
-        // The receiver comes back while the writer waits for it. A fence
-        // that gives up stops the writer under the dial: report its exit.
-        const back = writerStopped
-            ? undefined
-            : await within(
-                  rejoin(receiver.directory, address, writer.peer),
-                  "the receiver rejoins"
-              ).catch((error: Error) => error);
-        await stopped;
-        expect(process.exitCode ?? 0, stderr().join("\n")).toBe(0);
-        if (back instanceof Error) throw back;
-        expect(live.has(writer.peer)).toBe(false);
-        await fs.rm(writer.directory, {
-            recursive: true,
-            force: true,
-            maxRetries: 10,
-            retryDelay: 200,
-        });
-
-        if (back) await stop(back);
-        const reopened = await reopenOffline(receiver.directory, address);
-        for (let i = 0; i < MANY_FILES; i++) {
-            expect(
-                text(await reopened.readFile(`/f${i}.txt`)),
-                `/f${i}.txt`
-            ).toBe(content(i));
-        }
-        const waiting = findLine(/waiting up to/);
-        const done = findLine(/entries acknowledged in \d+ ms$/);
-        expect(waiting).toBeDefined();
-        expect(done?.line).toMatch(
-            /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
-        );
-        console.log(
-            `persist-on-exit ${MANY_FILES} files:`,
-            JSON.stringify({
-                writeMs: Math.round(writeMs),
-                fenceMs: Math.round(done!.at - waiting!.at),
-                line: done!.line,
-            })
-        );
-    });
-
-    it("is not failed by another writer adding a file a second while it waits", async () => {
-        const writer = await createPeer("writer");
-        const receiver = await createPeer("receiver");
-        // In memory: a replica that writes, but can issue no persisted
-        // receipt, so the fence waits for the receiver.
-        const remote = await createPeer("remote", true);
-        await writer.peer.dial(receiver.peer.getMultiaddrs());
-        await remote.peer.dial(writer.peer.getMultiaddrs());
-        const writerFs = await open(writer.peer, "writer");
-        const address = writerFs.address;
-        await open(receiver.peer, "receiver", address);
-        const remoteFs = await open(remote.peer, "remote", address);
-        await untilReplicaSeen(writerFs);
-        await stop(receiver.peer);
-
-        const backend = createSharedFsMountBackend(writerFs);
-        await writeThroughMount(backend, 20);
-
-        // Arrivals at the writer from the remote writer.
-        const arrivals: number[] = [];
-        const arrivalWaiters: Array<() => void> = [];
-        writerFs.program.entries.events.addEventListener(
-            "change",
-            (event: any) => {
-                for (const value of event.detail.added) {
-                    if (
-                        value instanceof FileVersion &&
-                        value.machineLabel === "remote"
-                    ) {
-                        arrivals.push(performance.now());
-                    }
+            // The Windows path: a `shutdown` line on stdin.
+            const { stopped, input } = shutdownOnRequest(
+                { peer: writer.peer, handle: writerFs },
+                backend,
+                { persistOnExit: true, persistTimeoutMs: SUCCESS_FENCE_MS }
+            );
+            input.write("shutdown\n");
+            let writerStopped = false;
+            void stopped.then(
+                () => (writerStopped = true),
+                () => {}
+            );
+            const rejoinAt: RejoinTimes = {};
+            let back:
+                | { peer: Peerbit; handle: SharedFsHandle }
+                | Error
+                | undefined;
+            // Printed once, as soon as the writer's stop settles and before
+            // anything is checked: when the receiver was back (ms from the
+            // "waiting up to" line), when the fence ended and how much of the
+            // store the receiver held. A stop past its bound and a test past
+            // its timeout skip the exit-code check, which prints stderr, so
+            // they print the persist-on-exit lines too.
+            let reported = false;
+            const report = (withPersistLines: boolean) => {
+                if (reported) return;
+                reported = true;
+                const waiting = findLine(/waiting up to/);
+                const since = (at?: number) =>
+                    at === undefined || !waiting
+                        ? null
+                        : Math.round(at - waiting.at);
+                console.log(
+                    `persist-on-exit fence: ${JSON.stringify({
+                        rejoinStartedAt: since(rejoinAt.started),
+                        rejoinCreatedAt: since(rejoinAt.created),
+                        rejoinDialedAt: since(rejoinAt.dialed),
+                        rejoinResolvedAt: since(rejoinAt.opened),
+                        rejoinMs:
+                            rejoinAt.opened === undefined
+                                ? null
+                                : Math.round(
+                                      rejoinAt.opened - rejoinAt.started!
+                                  ),
+                        rejoinError:
+                            back instanceof Error ? back.message : null,
+                        fenceEndedAt: since(
+                            findLine(
+                                /entries acknowledged in \d+ ms$|gave up: /
+                            )?.at
+                        ),
+                        receiverEntries:
+                            back && !(back instanceof Error)
+                                ? logLength(back.handle)
+                                : null,
+                    })}`
+                );
+                const persist = persistLines(stderr());
+                if (withPersistLines && persist.length) {
+                    console.log(persist.join("\n"));
                 }
-                for (const wake of arrivalWaiters.splice(0)) wake();
+            };
+            // Vitest aborts the signal when the test times out.
+            signal.addEventListener("abort", () => report(true));
+            try {
+                await Promise.race([untilLine(/waiting up to/), stopped]);
+                // The receiver comes back while the writer waits for it. A
+                // fence that gives up stops the writer under the dial: report
+                // its exit.
+                back = writerStopped
+                    ? undefined
+                    : await within(
+                          rejoin(
+                              receiver.directory,
+                              address,
+                              writer.peer,
+                              rejoinAt
+                          ),
+                          "the receiver rejoins"
+                      ).catch((error: Error) => error);
+                await stopped;
+            } catch (error) {
+                report(true);
+                throw error;
             }
-        );
-        let writing = true;
-        const remoteWrites = (async () => {
-            for (let n = 0; writing; n++) {
-                await remoteFs.writeFile(`/remote-${n}.txt`, `remote ${n}`);
-                await new Promise((resolve) => setTimeout(resolve, 1_000));
-            }
-        })();
+            report(false);
+            expect(process.exitCode ?? 0, stderr().join("\n")).toBe(0);
+            if (back instanceof Error) throw back;
+            expect(live.has(writer.peer)).toBe(false);
+            await fs.rm(writer.directory, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 200,
+            });
 
-        const { stopped, host } = shutdownOnRequest(
-            { peer: writer.peer, handle: writerFs },
-            backend,
-            { persistOnExit: true, persistTimeoutMs: FENCE_MS }
-        );
-        host.emit("SIGTERM");
-        let writerStopped = false;
-        void stopped.then(
-            () => (writerStopped = true),
-            () => {}
-        );
-        await Promise.race([untilLine(/waiting up to/), stopped]);
-        const fenceStarted = performance.now();
-        // Three remote files arrive while the fence waits, then the
-        // receiver comes back.
-        const during = () => arrivals.filter((at) => at > fenceStarted).length;
-        const deadline = giveUpAfter(STEP_MS, "three remote files arrive");
-        try {
-            while (!writerStopped && during() < 3) {
-                await Promise.race([
-                    new Promise<void>((resolve) =>
-                        arrivalWaiters.push(resolve)
-                    ),
-                    stopped,
-                    deadline.expired,
-                ]);
+            if (back) await stop(back.peer);
+            const reopened = await reopenOffline(receiver.directory, address);
+            for (let i = 0; i < MANY_FILES; i++) {
+                expect(
+                    text(await reopened.readFile(`/f${i}.txt`)),
+                    `/f${i}.txt`
+                ).toBe(content(i));
             }
-        } finally {
-            deadline.clear();
-        }
-        expect(writerStopped, "the fence waited for the receiver").toBe(false);
-        const back = await within(
-            rejoin(receiver.directory, address, writer.peer),
-            "the receiver rejoins"
-        );
-        await stopped;
-        writing = false;
-        await remoteWrites.catch(() => {});
-
-        expect(during()).toBeGreaterThanOrEqual(3);
-        expect(process.exitCode ?? 0).toBe(0);
-        expect(persistLines(stderr()).at(-1)).toMatch(
-            /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
-        );
-        await stop(remote.peer);
-        await stop(back);
-        const reopened = await reopenOffline(receiver.directory, address);
-        for (let i = 0; i < 20; i++) {
-            expect(text(await reopened.readFile(`/f${i}.txt`))).toBe(
-                content(i)
+            const waiting = findLine(/waiting up to/);
+            const done = findLine(/entries acknowledged in \d+ ms$/);
+            expect(waiting).toBeDefined();
+            expect(done?.line).toMatch(
+                /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
+            );
+            console.log(
+                `persist-on-exit ${MANY_FILES} files:`,
+                JSON.stringify({
+                    writeMs: Math.round(writeMs),
+                    fenceMs: Math.round(done!.at - waiting!.at),
+                    line: done!.line,
+                })
             );
         }
-    });
+    );
+
+    it(
+        "is not failed by another writer adding a file a second while it waits",
+        { timeout: SUCCESS_TEST_MS },
+        async () => {
+            const writer = await createPeer("writer");
+            const receiver = await createPeer("receiver");
+            // In memory: a replica that writes, but can issue no persisted
+            // receipt, so the fence waits for the receiver.
+            const remote = await createPeer("remote", true);
+            await writer.peer.dial(receiver.peer.getMultiaddrs());
+            await remote.peer.dial(writer.peer.getMultiaddrs());
+            const writerFs = await open(writer.peer, "writer");
+            const address = writerFs.address;
+            await open(receiver.peer, "receiver", address);
+            const remoteFs = await open(remote.peer, "remote", address);
+            await untilReplicaSeen(writerFs);
+            await stop(receiver.peer);
+
+            const backend = createSharedFsMountBackend(writerFs);
+            await writeThroughMount(backend, 20);
+
+            // Arrivals at the writer from the remote writer.
+            const arrivals: number[] = [];
+            const arrivalWaiters: Array<() => void> = [];
+            writerFs.program.entries.events.addEventListener(
+                "change",
+                (event: any) => {
+                    for (const value of event.detail.added) {
+                        if (
+                            value instanceof FileVersion &&
+                            value.machineLabel === "remote"
+                        ) {
+                            arrivals.push(performance.now());
+                        }
+                    }
+                    for (const wake of arrivalWaiters.splice(0)) wake();
+                }
+            );
+            let writing = true;
+            const remoteWrites = (async () => {
+                for (let n = 0; writing; n++) {
+                    await remoteFs.writeFile(`/remote-${n}.txt`, `remote ${n}`);
+                    await new Promise((resolve) => setTimeout(resolve, 1_000));
+                }
+            })();
+
+            const { stopped, host } = shutdownOnRequest(
+                { peer: writer.peer, handle: writerFs },
+                backend,
+                { persistOnExit: true, persistTimeoutMs: SUCCESS_FENCE_MS }
+            );
+            host.emit("SIGTERM");
+            let writerStopped = false;
+            void stopped.then(
+                () => (writerStopped = true),
+                () => {}
+            );
+            await Promise.race([untilLine(/waiting up to/), stopped]);
+            const fenceStarted = performance.now();
+            // Three remote files arrive while the fence waits, then the
+            // receiver comes back.
+            const during = () =>
+                arrivals.filter((at) => at > fenceStarted).length;
+            const deadline = giveUpAfter(STEP_MS, "three remote files arrive");
+            try {
+                while (!writerStopped && during() < 3) {
+                    await Promise.race([
+                        new Promise<void>((resolve) =>
+                            arrivalWaiters.push(resolve)
+                        ),
+                        stopped,
+                        deadline.expired,
+                    ]);
+                }
+            } finally {
+                deadline.clear();
+            }
+            expect(writerStopped, "the fence waited for the receiver").toBe(
+                false
+            );
+            const back = await within(
+                rejoin(receiver.directory, address, writer.peer),
+                "the receiver rejoins"
+            );
+            await stopped;
+            writing = false;
+            await remoteWrites.catch(() => {});
+
+            expect(during()).toBeGreaterThanOrEqual(3);
+            expect(process.exitCode ?? 0, stderr().join("\n")).toBe(0);
+            expect(persistLines(stderr()).at(-1)).toMatch(
+                /^persist-on-exit: \d+ entries acknowledged in \d+ ms$/
+            );
+            await stop(remote.peer);
+            await stop(back.peer);
+            const reopened = await reopenOffline(receiver.directory, address);
+            for (let i = 0; i < 20; i++) {
+                expect(text(await reopened.readFile(`/f${i}.txt`))).toBe(
+                    content(i)
+                );
+            }
+        }
+    );
 
     it("exits 75 at its deadline and lists each unacknowledged file when the only replica is gone", async () => {
         const writer = await createPeer("writer");
