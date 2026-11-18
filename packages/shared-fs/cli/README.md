@@ -600,8 +600,9 @@ request aborts the wait while it runs (the list is printed, then `mount`
 exits at once, without stopping Peerbit) and otherwise exits at once. One
 within 100 ms of the last is taken for the copy of a Ctrl-C that npm, pnpm
 and npx pass on: it only prints a hint. A shutdown signal while `mount` is
-still starting, before it has mounted, exits at once too; a `shutdown` line
-is read once it has mounted. Windows has no SIGTERM: `taskkill` and
+still starting, before it has mounted, exits at once too (until it holds its
+state directory, by the signal's default action); a `shutdown` line is read
+once it has mounted. Windows has no SIGTERM: `taskkill` and
 `child.kill()` skip all this, so send `shutdown`; a closed console window
 leaves about 10 s.
 
@@ -611,10 +612,10 @@ Exit codes: 0 stopped; 1 failed, or an open file could not be saved
 `persist-on-exit: unacknowledged {"path":...,"ids":[...]}` line per path (ids
 with no path: `"path":null`; 200, then `unlisted {"paths":n}`) for writes
 that stay saved here with no receipt; 130 a second request stopped it, or a
-shutdown signal while it was starting. 1 is kept over 70, 75 and 130, 70 over
-75 and 130, and 75 over 130. Unlike `prepare-disposal`, it fences only this
-session's own writes, while other writers keep writing; retire a machine with
-`prepare-disposal`.
+shutdown signal while it was starting, once it held its state directory. 1 is
+kept over 70, 75 and 130, 70 over 75 and 130, and 75 over 130. Unlike
+`prepare-disposal`, it fences only this session's own writes, while other
+writers keep writing; retire a machine with `prepare-disposal`.
 
 ## Run a mount under a supervisor
 
