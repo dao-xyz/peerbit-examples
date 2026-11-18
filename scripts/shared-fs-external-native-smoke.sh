@@ -476,8 +476,11 @@ if [ "$(uname -s)" = "Linux" ] &&
   [ -z "${PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-}" ] &&
   [ -z "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ] &&
   [ -z "${PEERBIT_SHARED_FS_NATIVE_CONTROL_BENCH_OUTPUT:-}" ]; then
+  # Milliseconds from bash's own clock, so the bounds do not depend on how a
+  # date(1) implementation reads %3N.
   now_ms() {
-    date +%s%3N
+    local t=${EPOCHREALTIME/[.,]/}
+    echo $((10#$t / 1000))
   }
   # A zombie (exited, not yet reaped by its new parent) counts as gone.
   process_alive() {
