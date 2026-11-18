@@ -617,8 +617,11 @@ has to watch `mount`:
 - A dead `mount`, even one killed with `kill -9`, ends the adapter and its
   mount. The adapter keeps a second IPC connection to `mount` open, and
   unmounts and exits when it closes, on every OS. On Linux the kernel also
-  sends it SIGHUP when `mount` exits. On Windows, Node runs the adapter in a
-  job object that ends it with `mount`, and WinFsp removes the drive.
+  sends it SIGHUP when its parent exits, so a wrapper script given as
+  `--native-adapter` should start the adapter with `exec`; otherwise the
+  adapter says so and relies on the IPC connection. On Windows, Node runs the
+  adapter in a job object that ends it with `mount`, and WinFsp removes the
+  drive.
 - An adapter that was killed cannot unmount: Linux and macOS keep a
   disconnected mount there, which would block the next mount. On Linux it
   fails with `Transport endpoint is not connected`. The next `mount` at that

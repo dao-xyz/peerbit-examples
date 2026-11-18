@@ -12,7 +12,7 @@ import (
 // exits. The signal is SIGHUP, on which the adapter unmounts and exits
 // (notifyHangup).
 func init() {
-	parentDeathErr = armParentDeath(os.Getenv(parentPIDEnv), setParentDeathSignal, os.Getppid)
+	parentDeathNote, parentDeathErr = armParentDeath(os.Getenv(parentPIDEnv), setParentDeathSignal, os.Getppid)
 }
 
 func setParentDeathSignal() error {

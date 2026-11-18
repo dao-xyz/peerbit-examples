@@ -328,9 +328,12 @@ gone, however that process ended:
 - On Linux, `peerbit-fs mount` passes its process id in
   `PEERBIT_SHARED_FS_PARENT_PID`. The adapter asks the kernel for SIGHUP when
   its parent exits (`PR_SET_PDEATHSIG`) and then checks that its parent is
-  still that process: one that exited first would never signal it, and the
-  adapter then refuses to start. Without the variable (an adapter started by
-  hand) it skips this.
+  that process. Another parent, a wrapper that did not `exec` the adapter
+  (a shell script, `sudo`, `strace -f`) or a `peerbit-fs` that exited before
+  the request, gets a one-line note on stderr and no refusal: the signal then
+  watches that parent, and the IPC connections still end the mount (they fail
+  at once when `peerbit-fs` is gone). Without the variable (an adapter started
+  by hand) it skips this.
 - SIGHUP, from that request or a closed terminal, unmounts and exits with
   status 0, as SIGINT and SIGTERM do.
 - On Windows, Node starts the adapter in a job object that terminates it

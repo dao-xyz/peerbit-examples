@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -48,16 +49,17 @@ func TestParentDeathSignalReachesTheAdapter(t *testing.T) {
 	}
 }
 
-// An adapter whose parent exited before the signal was armed has already been
-// handed to another parent: it finds that out and refuses to start.
-func TestParentDeathCheckRefusesAnAdapterWhoseParentIsGone(t *testing.T) {
+// An adapter whose parent is not peerbit-fs (a wrapper that did not exec it,
+// or a peerbit-fs that exited before the signal was armed) says so and goes
+// on: its IPC connections still end the mount. This test process stands in for
+// the wrapper, and its own parent for peerbit-fs.
+func TestParentDeathCheckNotesAnotherParentAndGoesOn(t *testing.T) {
 	reports, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reports.Close()
 	adapter := exec.Command(os.Args[0], "-test.run=^TestParentDeathHelper$")
-	// This test's own parent stands in for the parent that is gone.
 	adapter.Env = append(os.Environ(), "PBFS_PARENT_DEATH_HELPER=child", parentPIDEnv+"="+strconv.Itoa(os.Getppid()))
 	adapter.ExtraFiles = []*os.File{writer}
 	adapter.Stderr = os.Stderr
@@ -69,9 +71,13 @@ func TestParentDeathCheckRefusesAnAdapterWhoseParentIsGone(t *testing.T) {
 		_ = adapter.Process.Kill()
 		_ = adapter.Wait()
 	}()
-	want := "refused: " + errParentGone.Error()
-	if line := receiveWithin(t, readLines(reports), "the stand-in adapter's check"); line != want {
-		t.Fatalf("stand-in adapter said %q, want %q", line, want)
+	lines := readLines(reports)
+	want := fmt.Sprintf("note: the adapter's parent is process %d, not peerbit-fs (process %d)", os.Getpid(), os.Getppid())
+	if line := receiveWithin(t, lines, "the stand-in adapter's check"); !strings.HasPrefix(line, want) {
+		t.Fatalf("stand-in adapter said %q, want a line starting %q", line, want)
+	}
+	if line := receiveWithin(t, lines, "the stand-in adapter to arm"); line != "armed" {
+		t.Fatalf("stand-in adapter said %q after its note, want armed", line)
 	}
 }
 
@@ -99,6 +105,9 @@ func TestParentDeathHelper(t *testing.T) {
 		if parentDeathErr != nil {
 			fmt.Fprintf(report, "refused: %v\n", parentDeathErr)
 			return
+		}
+		if parentDeathNote != "" {
+			fmt.Fprintf(report, "note: %s\n", parentDeathNote)
 		}
 		hangup := make(chan os.Signal, 1)
 		signal.Notify(hangup, syscall.SIGHUP)

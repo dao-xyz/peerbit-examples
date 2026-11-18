@@ -38,8 +38,9 @@ export const NATIVE_ADAPTER_IPC_TOKEN_ENV = "PEERBIT_SHARED_FS_IPC_TOKEN";
 
 /**
  * The mount process's id. On Linux the adapter asks the kernel for SIGHUP when
- * that process exits, then checks it is still its parent, and unmounts on the
- * signal. Every adapter also unmounts when its IPC connection ends.
+ * its parent exits and unmounts on it; a parent other than this process (a
+ * wrapper that did not exec it) gets a note. Every adapter also unmounts when
+ * its IPC connection ends.
  */
 export const NATIVE_ADAPTER_PARENT_PID_ENV = "PEERBIT_SHARED_FS_PARENT_PID";
 

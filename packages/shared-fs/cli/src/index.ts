@@ -1670,7 +1670,7 @@ export const createCliParser = (args: string[]) => {
                     .option("native-adapter", {
                         type: "string",
                         description:
-                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Bypasses the managed adapter's release pin and is not checked: use an adapter from this CLI's release (one from 0.13.15 or earlier mounts but fails every operation).",
+                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Bypasses the managed adapter's release pin and is not checked: use an adapter from this CLI's release (one from 0.13.15 or earlier mounts but fails every operation). A wrapper script should start the adapter with exec.",
                     })
                     .option("write-ready-timeout-ms", {
                         type: "number",

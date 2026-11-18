@@ -24,6 +24,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %v\n", parentDeathErr)
 		os.Exit(1)
 	}
+	if parentDeathNote != "" {
+		fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %s\n", parentDeathNote)
+	}
 
 	// The CLI passes the IPC token in the environment, which other users
 	// cannot read. Unset it, and the parent's process id, so nothing the

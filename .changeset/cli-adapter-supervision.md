@@ -16,8 +16,9 @@ such as systemd or launchd only has to watch `mount`:
   `peerbit-fs unmount` no longer leaves its `mount` process running.
 - An adapter whose `mount` dies, even by `kill -9`, unmounts and exits: it
   holds a second IPC connection to `mount` and stops when that closes, and on
-  Linux the kernel also sends it SIGHUP when `mount` exits. On Windows, Node
-  already ends the adapter with `mount`, and WinFsp removes the drive.
+  Linux the kernel also sends it SIGHUP when its parent exits (a wrapper
+  script given as `--native-adapter` should start it with `exec`). On Windows,
+  Node already ends the adapter with `mount`, and WinFsp removes the drive.
 - A mountpoint left disconnected by a killed adapter, which fails with
   `Transport endpoint is not connected` on Linux, no longer blocks the next
   mount: the next adapter there unmounts it first, but only when the mount
