@@ -30,7 +30,9 @@ such as systemd or launchd only has to watch `mount`:
   Node already ends the adapter with `mount`, and WinFsp removes the drive.
 - `mount` exits as soon as its stop is done, about a second sooner than
   before, and a shutdown request that comes after the stop exits at once with
-  the exit code already set.
+  the exit code already set. A stop step that failed (the others still run)
+  is printed as one line before `mount` exits 1, instead of the `mount` help
+  and a stack trace.
 
 The adapter changes reach users through this CLI version's adapter release
 (`shared-fs-native-v<version>`). No wire or storage format changes.

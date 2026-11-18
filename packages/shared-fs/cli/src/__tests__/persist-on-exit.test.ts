@@ -6,6 +6,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import {
     FileVersion,
     Peerbit,
@@ -17,6 +18,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reportAdapterExit } from "../external-native-adapter.js";
 import {
+    exitAfterStop,
     exitOnceFlushed,
     persistOnExit,
     runCli,
@@ -372,6 +374,65 @@ describe("mount shutdown requests", () => {
         }
         expect(writes).toBe(3);
         expect(host.exit).toHaveBeenCalledExactlyOnceWith(75);
+    });
+
+    it("prints a failed stop's error as one line and exits 1 over 70 once stdout and stderr have written it", async () => {
+        const lines: string[] = [];
+        vi.spyOn(console, "error").mockImplementation((...args) => {
+            lines.push(stripVTControlCharacters(args.join(" ")));
+        });
+        const held: (() => void)[] = [];
+        const slow = () =>
+            new Writable({
+                write: (_chunk, _encoding, done) => void held.push(done),
+            });
+        // The adapter's exit set 70, then clearing the mount it left failed;
+        // the other steps still ran.
+        process.exitCode = 70;
+        const order: string[] = [];
+        const host = fakeHost();
+        const stopped = waitForTermination(
+            () =>
+                stopMountSession({
+                    mounted: {
+                        unmount: async () => {
+                            throw new Error("Could not clear /mnt: not ours");
+                        },
+                    },
+                    stopPeerbit: async () => void order.push("peerbit"),
+                }),
+            host as any,
+            new PassThrough()
+        );
+        host.emit("SIGTERM");
+        // Settles: nothing is thrown on to yargs.
+        await exitAfterStop(stopped, host as any, [slow(), slow()]);
+        expect(order).toEqual(["peerbit"]);
+        expect(lines).toEqual(["Could not clear /mnt: not ours"]);
+        expect(process.exitCode).toBe(1);
+        expect(held).toHaveLength(2);
+        held.shift()!();
+        await settle();
+        expect(host.exit).not.toHaveBeenCalled();
+        held.shift()!();
+        await settle();
+        expect(host.exit).toHaveBeenCalledExactlyOnceWith(1);
+
+        // A stop that succeeded prints nothing and exits with the code set.
+        process.exitCode = 70;
+        const done = fakeHost();
+        const flushed = () =>
+            new Writable({ write: (_chunk, _encoding, next) => next() });
+        const succeeded = waitForTermination(
+            async () => {},
+            done as any,
+            new PassThrough()
+        );
+        done.emit("SIGINT");
+        await exitAfterStop(succeeded, done as any, [flushed(), flushed()]);
+        await settle();
+        expect(lines).toHaveLength(1);
+        expect(done.exit).toHaveBeenCalledExactlyOnceWith(70);
     });
 
     it("exits at once on a second request outside the wait, with the exit code set", async () => {
@@ -1289,12 +1350,17 @@ describe("peerbit-fs mount as a process", () => {
     // A stand-in for the native adapter, no FUSE: it writes through the
     // mount's IPC as an adapter does, leaves /open.txt open, then is ready.
     // As the adapter, it exits 0 on SIGINT (it unmounted), and its
-    // --clear-dead-mount says what it was asked to clear.
+    // --clear-dead-mount says what it was asked to clear or, with
+    // STAND_IN_REFUSES_CLEAR set, refuses as at a mount it may not clear.
     const standInAdapter = `
         import { once } from "node:events";
         import { createConnection } from "node:net";
         const option = (name) => process.argv[process.argv.indexOf(name) + 1];
         if (process.argv.includes("--clear-dead-mount")) {
+            if (process.env.STAND_IN_REFUSES_CLEAR) {
+                process.stderr.write(option("--mountpoint") + " is not a mount this stand-in left\\n");
+                process.exit(1);
+            }
             process.stderr.write("stand-in adapter cleared " + option("--mountpoint") + "\\n");
             process.exit(0);
         }
@@ -1344,7 +1410,8 @@ describe("peerbit-fs mount as a process", () => {
 
     /**
      * Runs `test` against a mount process with the stand-in adapter, once
-     * its receiver replica holds /closed.txt; then kills what is left.
+     * its receiver replica holds /closed.txt; then kills what is left. `env`
+     * is added to the mount's environment, which its adapter inherits.
      */
     const withMountProcess = async (
         test: (mount: {
@@ -1354,7 +1421,8 @@ describe("peerbit-fs mount as a process", () => {
             receiver: SharedFsHandle;
             adapterPid: number;
             mountpoint: string;
-        }) => Promise<void>
+        }) => Promise<void>,
+        env: NodeJS.ProcessEnv = {}
     ) => {
         const base = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-mount-process-")
@@ -1396,7 +1464,10 @@ describe("peerbit-fs mount as a process", () => {
                     "--persist-timeout-ms",
                     String(STEP_MS),
                 ],
-                { cwd: cliDirectory, env: { ...process.env, FORCE_COLOR: "0" } }
+                {
+                    cwd: cliDirectory,
+                    env: { ...process.env, FORCE_COLOR: "0", ...env },
+                }
             );
             const output: string[] = [];
             const errors: string[] = [];
@@ -1553,4 +1624,52 @@ describe("peerbit-fs mount as a process", () => {
                 );
             }
         ));
+
+    // Windows has no clear step: WinFsp removes the drive.
+    it.skipIf(process.platform === "win32")(
+        "exits 1 once its stop is done when it may not clear what its killed adapter left: every step runs, and only that error is printed",
+        () =>
+            withMountProcess(
+                async ({
+                    errors,
+                    exited,
+                    receiver,
+                    adapterPid,
+                    mountpoint,
+                }) => {
+                    process.kill(adapterPid, "SIGKILL");
+                    // 1 is kept over 70. The mount process's 10-minute timer
+                    // is not waited for.
+                    expect(
+                        await within(exited, "the mount exits", FENCE_MS),
+                        errors.join("\n")
+                    ).toBe(1);
+                    expect(errors).toContainEqual(
+                        expect.stringMatching(
+                            /^Native adapter exited after mount readiness: .*\(exit status 70\)\.$/
+                        )
+                    );
+                    // The steps after the failed one: drained and fenced.
+                    expect(persistLines(errors)).toEqual(fenced);
+                    expect(text(await receiver.readFile("/open.txt"))).toBe(
+                        "/open.txt"
+                    );
+                    // No `mount` help and no stack trace: the error, once, on
+                    // one line with the adapter's reason.
+                    expect(
+                        errors.filter((line) =>
+                            /^(Positionals|Options):$|^\s+at /.test(line)
+                        )
+                    ).toEqual([]);
+                    expect(
+                        errors.filter((line) =>
+                            line.includes("Could not clear")
+                        )
+                    ).toEqual([
+                        `Could not clear ${mountpoint}, which the native adapter left disconnected: ${mountpoint} is not a mount this stand-in left`,
+                    ]);
+                },
+                { STAND_IN_REFUSES_CLEAR: "1" }
+            )
+    );
 });

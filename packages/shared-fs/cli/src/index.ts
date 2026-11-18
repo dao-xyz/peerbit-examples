@@ -526,6 +526,26 @@ export const exitOnceFlushed = (
         stream.write("", () => --pending || host.exit(process.exitCode ?? 0));
 };
 
+/**
+ * Exits once the mount's stop has settled, as exitOnceFlushed does. A stop
+ * that failed ran every step, then threw the first failure: that error is
+ * printed as one line, with exit code 1. Thrown on, it reached yargs, which
+ * printed the `mount` help and a stack trace.
+ */
+export const exitAfterStop = async (
+    stopped: Promise<void>,
+    host: Pick<NodeJS.Process, "exit"> = process,
+    streams?: NodeJS.WritableStream[]
+) => {
+    await stopped.catch((error: unknown) => {
+        process.exitCode = 1;
+        console.error(
+            chalk.red(error instanceof Error ? error.message : String(error))
+        );
+    });
+    exitOnceFlushed(host, streams);
+};
+
 /** Unacknowledged paths listed one per line; one more line counts the rest. */
 const LISTED_PATHS = 200;
 
@@ -1893,22 +1913,23 @@ export const createCliParser = (args: string[]) => {
                 // An adapter that exits on its own ends the mount through the
                 // same stop as a shutdown request: drain, persist-on-exit and
                 // Peerbit's stop still run.
-                await waitForTermination(
-                    (shutdown) =>
-                        stopMountSession({
-                            mounted,
-                            ipc,
-                            backend,
-                            profileWriter,
-                            persist: () =>
-                                persistOnExit(fsHandle, argv, shutdown),
-                            stopPeerbit: () => stopPeerbitForCli(peerbit),
-                        }),
-                    process,
-                    process.stdin,
-                    adapterExited
+                await exitAfterStop(
+                    waitForTermination(
+                        (shutdown) =>
+                            stopMountSession({
+                                mounted,
+                                ipc,
+                                backend,
+                                profileWriter,
+                                persist: () =>
+                                    persistOnExit(fsHandle, argv, shutdown),
+                                stopPeerbit: () => stopPeerbitForCli(peerbit),
+                            }),
+                        process,
+                        process.stdin,
+                        adapterExited
+                    )
                 );
-                exitOnceFlushed();
             }
         )
         .command(
