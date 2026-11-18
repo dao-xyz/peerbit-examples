@@ -22,34 +22,59 @@ const facts = (over: Partial<HoldFacts> = {}): HoldFacts => ({
     holdAt: 800,
     boundAt: 30_800,
     endAt: 120_800,
+    checks: 0,
     commitDiagnostics: [],
     changes: 0,
-    clobbered: 0,
     atBound: snapshot(),
     atEnd: snapshot({ at: 120_800 }),
     ...over,
 });
 
 describe("cold-start hold diagnosis", () => {
-    it("A: the label committed before the bound and the hold did not release", () => {
+    it("A: the store held the label by the bound and the hold did not release", () => {
+        const stored = snapshot({ inLog: true, inIndex: true });
         expect(
             classifyHold(
                 facts({
                     receivedAt: 1_000,
-                    committedAt: 1_200,
-                    commitDiagnostics: [900],
+                    changedAt: 1_200,
+                    checks: 1,
+                    lastCheck: { at: 1_210, inLog: true, inIndex: "error" },
                     changes: 2,
                     endAt: 30_810,
+                    atBound: stored,
                 })
             )
         ).toEqual({
             code: "A",
             name: "hold detection did not fire",
-            text: "the label committed at 1.2 s, but no commit diagnostic released the hold after its change event (1 diagnostics, 0 after it; 0 later change events reset the match)",
+            text: "the label was in the joiner's log and index at the bound and a change event carried it at 1.2 s, but no store check released the hold (store checks: 1; the last, at 1.2 s, read in log true, in index error)",
         });
+        expect(classifyHold(facts({ atBound: stored })).text).toBe(
+            "the label was in the joiner's log and index at the bound, but no change event carried it, so the hold never checked the store"
+        );
+        // A check found it by the bound, though the reads at the bound
+        // gave up.
         expect(
-            classifyHold(facts({ atBound: snapshot({ inIndex: true }) })).code
+            classifyHold(
+                facts({
+                    receivedAt: 1_000,
+                    changedAt: 1_200,
+                    committedAt: 1_210,
+                    atBound: snapshot({
+                        inLog: "timeout",
+                        inIndex: "timeout",
+                    }),
+                })
+            ).code
         ).toBe("A");
+        // In the log alone, or in the index alone, is not committed.
+        for (const atBound of [
+            snapshot({ inLog: true }),
+            snapshot({ inIndex: true }),
+        ]) {
+            expect(classifyHold(facts({ atBound })).code).toBe("C");
+        }
     });
 
     it("B: the label never reached the joiner, or only after the bound", () => {
@@ -84,8 +109,27 @@ describe("cold-start hold diagnosis", () => {
         ).toEqual({
             code: "C",
             name: "joiner commit",
-            text: "the joiner received the label at 1.0 s but had not committed it by the bound: its canPerformEntry was pending from 1.0 s; joining true, in log false; it had not committed when the diagnosis gave up at 120.8 s",
+            text: "the joiner received the label at 1.0 s but had not committed it to the store by the bound: its canPerformEntry was pending from 1.0 s; joining true, in log false, in index false; it had not committed when the diagnosis gave up at 120.8 s",
         });
+        // A change event that carried the label before its index write.
+        expect(
+            classifyHold(
+                facts({
+                    receivedAt: 1_000,
+                    canPerform: {
+                        startAt: 1_020,
+                        endAt: 1_040,
+                        result: "true",
+                    },
+                    changedAt: 1_300,
+                    checks: 4,
+                    lastCheck: { at: 29_000, inLog: true, inIndex: false },
+                    atBound: snapshot({ inLog: true }),
+                })
+            ).text
+        ).toBe(
+            "the joiner received the label at 1.0 s but had not committed it to the store by the bound: its canPerformEntry returned true at 1.0 s; a change event carried it at 1.3 s; joining false, in log true, in index false; it had not committed when the diagnosis gave up at 120.8 s"
+        );
         expect(
             classifyHold(
                 facts({
