@@ -460,6 +460,42 @@ describe("mount control endpoint", () => {
         }
     });
 
+    it("lets a command whose request line arrived in time run past the deadline, and answers it", async () => {
+        const directory = await stateDirectory();
+        let endpoint!: string;
+        const control = await startMountControl({
+            directory,
+            cliVersion: CLI,
+            // Short here; 30 s in a mount. The request line, written as the
+            // connection opens, arrives well within it.
+            limits: { requestMs: 2_000 },
+            // Runs until a connection it opens, which sends nothing, is
+            // closed at its own deadline. That deadline began after this
+            // request's, which, if it still ran, would end this one first.
+            handle: () =>
+                new Promise((resolve) => {
+                    const silent = net.createConnection(endpoint);
+                    silent.on("error", ignore);
+                    silent.once("close", () => resolve(4));
+                }),
+        });
+        endpoint = control.endpoint!;
+        try {
+            expect(
+                await within(
+                    answers(
+                        endpoint,
+                        requestLine(readMountControl(directory)!, "gc")
+                    ),
+                    "the command is answered"
+                )
+            ).toEqual([{ type: "done", exitCode: 4 }]);
+        } finally {
+            await control.close();
+            await removeDirectory(directory);
+        }
+    });
+
     it("runs a command beside a slow one, refuses commands once its mount stops, and cuts off one under way, aborting it", async () => {
         const directory = await stateDirectory();
         let started!: () => void;

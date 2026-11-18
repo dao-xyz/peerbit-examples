@@ -2599,7 +2599,7 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("refuses control requests first, detaches the backend and closes the mount profile before persisting, and removes the control endpoint just before stopping Peerbit", async () => {
+    it("refuses control requests and waits for their changes first, detaches the backend and closes the mount profile before persisting, and removes the control endpoint just before stopping Peerbit", async () => {
         const order: string[] = [];
         const profileWriter = {
             sink: () => {},
@@ -2619,12 +2619,17 @@ describe("peerbit-fs cli", () => {
                 };
             },
         };
-        const session = (failures: Partial<Record<string, Error>> = {}) => ({
+        const session = (
+            failures: Partial<Record<string, Error>> = {},
+            // When the endpoint's wait for the changes under way ends.
+            changesDone?: Promise<void>
+        ) => ({
             // Requests are refused through the persist-on-exit wait, and the
             // endpoint is removed while this process holds the directory.
             control: {
                 stopServing: async () => {
                     order.push("stopServing");
+                    await changesDone;
                 },
                 close: async () => {
                     order.push("close");
@@ -2668,7 +2673,15 @@ describe("peerbit-fs cli", () => {
         ];
 
         process.exitCode = undefined;
-        await stopMountSession(session());
+        // Nothing detaches while the endpoint waits for changes under way.
+        let changesDone!: () => void;
+        const stopping = stopMountSession(
+            session({}, new Promise<void>((resolve) => (changesDone = resolve)))
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(order).toEqual(["stopServing"]);
+        changesDone();
+        await stopping;
         expect(order).toEqual(everyStep);
         expect(process.exitCode).toBeUndefined();
 
