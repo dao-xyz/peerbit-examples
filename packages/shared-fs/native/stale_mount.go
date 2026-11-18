@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 )
@@ -64,6 +65,28 @@ func clearDeadMount(path string, system deadMountSystem) (cleared bool, err erro
 		return false, fmt.Errorf("%s is still disconnected (%v) after unmounting the mount an earlier adapter left there. Unmount it (%s %s), then mount again", path, reached, system.hint, path)
 	}
 	return true, nil
+}
+
+// clearAndReportDeadMount clears path as clearDeadMount does and says on stderr
+// when it unmounted something.
+func clearAndReportDeadMount(path string, system deadMountSystem, stderr io.Writer) error {
+	cleared, err := clearDeadMount(path, system)
+	if cleared {
+		fmt.Fprintf(stderr, "peerbit-shared-fs-native: unmounted the disconnected mount that an earlier adapter left at %s\n", path)
+	}
+	return err
+}
+
+// runClearDeadMount is --clear-dead-mount: peerbit-fs mount runs it after its
+// adapter exited without unmounting, so the mountpoint is not left
+// disconnected until the next mount there. It exits 0 when nothing is left to
+// clear, and 1 when it reports a mount it may not or could not unmount.
+func runClearDeadMount(path string, system deadMountSystem, stderr io.Writer) int {
+	if err := clearAndReportDeadMount(path, system, stderr); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func (system deadMountSystem) ours(entry *mountEntry) bool {

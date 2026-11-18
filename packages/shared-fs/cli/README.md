@@ -586,9 +586,10 @@ only.
 If the native adapter exits on its own once the mount is up (a crash,
 `kill -9`, the out-of-memory killer), `mount` prints its exit code or signal
 and the adapter's last 20 stderr lines, then stops as on a first request,
-persist-on-exit included, and exits 70. An adapter stopped from outside, by
-`peerbit-fs unmount` or `fusermount -u`/`umount`, exits 0: `mount` says so and
-stops the same way.
+persist-on-exit included, and exits 70. On Linux and macOS the stop starts by
+unmounting the disconnected mount the adapter left (see below). An adapter
+stopped from outside, by `peerbit-fs unmount` or `fusermount -u`/`umount`,
+exits 0: `mount` says so and stops the same way.
 
 A second request aborts the wait while it runs (the list is printed, then
 `mount` exits at once, without stopping Peerbit) and otherwise exits at once.
@@ -623,12 +624,13 @@ has to watch `mount`:
   adapter in a job object that ends it with `mount`, and WinFsp removes the
   drive.
 - An adapter that was killed cannot unmount: Linux and macOS keep a
-  disconnected mount there, which would block the next mount. On Linux it
-  fails with `Transport endpoint is not connected`. The next `mount` at that
-  mountpoint unmounts it first, and says so, when the mount table shows it is
-  a mount that a peerbit-fs adapter of the same user left (source
-  `peerbit-shared-fs`). A live mount is left alone; at any other
-  disconnected mount, `mount` fails and names the command to run
+  disconnected mount there (on Linux, `Transport endpoint is not connected`),
+  which would block the next mount. The stop of `mount` unmounts it, and so
+  does the next `mount` there before it mounts, when both processes were
+  killed. Each says so, and does it only when the mount table shows a mount
+  that a peerbit-fs adapter of the same user left (source
+  `peerbit-shared-fs`). A live mount is left alone; at any other disconnected
+  mount, `mount` fails with exit code 1 and names the command to run
   (`fusermount3 -u`, or `diskutil unmount force` on macOS).
 
 systemd, with a stop timeout above `--persist-timeout-ms`:

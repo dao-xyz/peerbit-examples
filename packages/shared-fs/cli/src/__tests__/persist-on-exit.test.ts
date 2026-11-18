@@ -1221,13 +1221,21 @@ describe("peerbit-fs mount as a process", () => {
     `)}`;
     // A stand-in for the native adapter, no FUSE: it writes through the
     // mount's IPC as an adapter does, leaves /open.txt open, then is ready.
+    // As the adapter, it exits 0 on SIGINT (it unmounted), and its
+    // --clear-dead-mount says what it was asked to clear.
     const standInAdapter = `
         import { once } from "node:events";
         import { createConnection } from "node:net";
+        const option = (name) => process.argv[process.argv.indexOf(name) + 1];
+        if (process.argv.includes("--clear-dead-mount")) {
+            process.stderr.write("stand-in adapter cleared " + option("--mountpoint") + "\\n");
+            process.exit(0);
+        }
+        process.on("SIGINT", () => process.exit(0));
         const ipc = (name) => import(new URL(name, ${JSON.stringify(libraryEsm.href)}).href);
         const { BoundedIpcByteReader } = await ipc("ipc-byte-reader.js");
         const v2 = await ipc("ipc-v2.js");
-        const endpoint = process.argv[process.argv.indexOf("--endpoint") + 1];
+        const endpoint = option("--endpoint");
         const tcp = endpoint.startsWith("tcp://") && new URL(endpoint);
         const socket = tcp
             ? createConnection({ host: tcp.hostname, port: Number(tcp.port) })
@@ -1278,6 +1286,7 @@ describe("peerbit-fs mount as a process", () => {
             exited: Promise<number | null>;
             receiver: SharedFsHandle;
             adapterPid: number;
+            mountpoint: string;
         }) => Promise<void>
     ) => {
         const base = await fs.mkdtemp(
@@ -1390,7 +1399,14 @@ describe("peerbit-fs mount as a process", () => {
                     .find((line) => line.startsWith("stand-in adapter pid "))
                     ?.slice("stand-in adapter pid ".length)
             );
-            await test({ child, errors, exited, receiver, adapterPid });
+            await test({
+                child,
+                errors,
+                exited,
+                receiver,
+                adapterPid,
+                mountpoint: path.join(base, "mnt"),
+            });
         } finally {
             child?.kill("SIGKILL");
             await within(exited, "the mount is gone").catch(() => {});
@@ -1403,6 +1419,9 @@ describe("peerbit-fs mount as a process", () => {
             });
         }
     };
+
+    const cleared = (line: string) =>
+        line.startsWith("stand-in adapter cleared ");
 
     const fenced = [
         expect.stringMatching(
@@ -1426,34 +1445,45 @@ describe("peerbit-fs mount as a process", () => {
             expect(text(await receiver.readFile("/open.txt"))).toBe(
                 "/open.txt"
             );
+            // The adapter unmounted: nothing to clear.
+            expect(errors.filter(cleared)).toEqual([]);
         }));
 
     it("ends when its adapter is killed after readiness: reports it, saves the open file, waits for the replica, exits 70", () =>
-        withMountProcess(async ({ errors, exited, receiver, adapterPid }) => {
-            expect(adapterPid).toBeGreaterThan(0);
-            const killed = performance.now();
-            // kill -9 on POSIX, TerminateProcess on Windows.
-            process.kill(adapterPid, "SIGKILL");
-            expect(
-                await within(exited, "the mount exits", FENCE_MS),
-                errors.join("\n")
-            ).toBe(70);
-            // Reported only: the 2 s bound is the Linux smoke's.
-            console.info(
-                `mount exited ${Math.round(performance.now() - killed)} ms after its adapter was killed`
-            );
-            expect(errors).toEqual(
-                expect.arrayContaining([
-                    expect.stringMatching(
-                        /^Native adapter exited after mount readiness: (code=null signal=SIGKILL|code=1 signal=null); stopping the mount \(exit status 70\)\.$/
-                    ),
-                    `native adapter stderr: stand-in adapter ${adapterPid} serving`,
-                ])
-            );
-            // The same stop as a shutdown request: drained and fenced.
-            expect(persistLines(errors)).toEqual(fenced);
-            expect(text(await receiver.readFile("/open.txt"))).toBe(
-                "/open.txt"
-            );
-        }));
+        withMountProcess(
+            async ({ errors, exited, receiver, adapterPid, mountpoint }) => {
+                expect(adapterPid).toBeGreaterThan(0);
+                const killed = performance.now();
+                // kill -9 on POSIX, TerminateProcess on Windows.
+                process.kill(adapterPid, "SIGKILL");
+                expect(
+                    await within(exited, "the mount exits", FENCE_MS),
+                    errors.join("\n")
+                ).toBe(70);
+                // Reported only: the 2 s bound is the Linux smoke's.
+                console.info(
+                    `mount exited ${Math.round(performance.now() - killed)} ms after its adapter was killed`
+                );
+                expect(errors).toEqual(
+                    expect.arrayContaining([
+                        expect.stringMatching(
+                            /^Native adapter exited after mount readiness: (code=null signal=SIGKILL|code=1 signal=null); stopping the mount \(exit status 70\)\.$/
+                        ),
+                        `native adapter stderr: stand-in adapter ${adapterPid} serving`,
+                    ])
+                );
+                // The same stop as a shutdown request: drained and fenced.
+                expect(persistLines(errors)).toEqual(fenced);
+                expect(text(await receiver.readFile("/open.txt"))).toBe(
+                    "/open.txt"
+                );
+                // It cleared the mount the adapter left, except on Windows,
+                // where WinFsp removes the drive.
+                expect(errors.filter(cleared)).toEqual(
+                    process.platform === "win32"
+                        ? []
+                        : [`stand-in adapter cleared ${mountpoint}`]
+                );
+            }
+        ));
 });

@@ -72,12 +72,8 @@ func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mou
 			return err
 		}
 	}
-	cleared, err := clearDeadMount(mountpoint, hostDeadMountSystem())
-	if err != nil {
+	if err := clearAndReportDeadMount(mountpoint, hostDeadMountSystem(), os.Stderr); err != nil {
 		return err
-	}
-	if cleared {
-		fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: unmounted the disconnected mount that an earlier adapter left at %s\n", mountpoint)
 	}
 	mounted, err := newMountWatcher(mountpoint)
 	if err != nil {

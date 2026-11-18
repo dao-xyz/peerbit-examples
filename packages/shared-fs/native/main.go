@@ -13,10 +13,16 @@ func main() {
 	endpoint := flag.String("endpoint", "", "shared-fs IPC endpoint")
 	mountpoint := flag.String("mountpoint", "", "native mountpoint")
 	debug := flag.Bool("debug", false, "enable native adapter debug output")
+	clearOnly := flag.Bool("clear-dead-mount", false, "only unmount a disconnected mount that a peerbit-fs adapter of this user left at --mountpoint, then exit")
 	flag.Parse()
 
+	// peerbit-fs mount runs this after its adapter died without unmounting.
+	if *clearOnly && *mountpoint != "" {
+		os.Exit(runClearDeadMount(*mountpoint, hostDeadMountSystem(), os.Stderr))
+	}
 	if *endpoint == "" || *mountpoint == "" {
 		fmt.Fprintln(os.Stderr, "usage: PEERBIT_SHARED_FS_IPC_TOKEN=<token> peerbit-shared-fs-native --endpoint <endpoint> --mountpoint <mountpoint>")
+		fmt.Fprintln(os.Stderr, "       peerbit-shared-fs-native --clear-dead-mount --mountpoint <mountpoint>")
 		os.Exit(2)
 	}
 	// Set on Linux before main runs (parent_death_linux.go).

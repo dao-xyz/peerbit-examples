@@ -465,12 +465,13 @@ fi
 # Supervision, on Linux runs without benchmarks or profiling. kill -9 stands
 # in for a crash or an out-of-memory kill. An adapter killed after readiness
 # ends its mount process through the stop a shutdown request takes, with
-# exit status 70, within 2 s; a new mount clears the disconnected mount it
-# left; and when a mount process is killed, its adapter unmounts and exits
-# within 5 s. These are generous upper bounds: about 1.05 s (most of it the
-# same exit tail as after Ctrl-C) and 15 ms were measured. The wait for the
-# killed mount process's adapter, which is not this shell's child, checks
-# every 50 ms and ends as soon as it is gone.
+# exit status 70, within 2 s, and that stop unmounts the disconnected mount
+# the adapter left. A disconnected mount that nothing cleared (its adapter
+# killed while the mount process was stopped, then the mount process killed)
+# is cleared by the next mount there. When a mount process is killed, its
+# adapter unmounts and exits within 5 s. These are generous upper bounds:
+# about 0.1 s and 15 ms were measured. The waits for an adapter that is not
+# this shell's child check every 50 ms and end as soon as it is gone.
 if [ "$(uname -s)" = "Linux" ] &&
   [ -z "${PEERBIT_SHARED_FS_NATIVE_MOUNT_PROFILE_DIR:-}" ] &&
   [ -z "${PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OUTPUT:-}" ] &&
@@ -491,6 +492,25 @@ if [ "$(uname -s)" = "Linux" ] &&
     fi
     printf '%s' "$pid"
   }
+  wait_for_gone() {
+    local pid="$1" since="$2" bound="$3" what="$4"
+    while process_alive "$pid"; do
+      if [ "$(($(now_ms) - since))" -gt "$bound" ]; then
+        echo "$what was still running $bound ms later" >&2
+        exit 1
+      fi
+      sleep 0.05
+    done
+  }
+  expect_disconnected() {
+    local stat_output
+    if stat_output="$(stat -- "$mountpoint" 2>&1)" ||
+      [[ "$stat_output" != *"Transport endpoint is not connected"* ]]; then
+      echo "Expected a disconnected mount at $mountpoint, stat said: $stat_output" >&2
+      exit 1
+    fi
+  }
+  cleared_line="unmounted the disconnected mount that an earlier adapter left at $mountpoint"
 
   adapter_pid="$(adapter_of "$mount_pid")"
   # Gives up after 30 s on a mount process that outlives its adapter: the
@@ -518,19 +538,37 @@ if [ "$(uname -s)" = "Linux" ] &&
   grep -qF "native adapter stderr: " "$log"
   # The stop ran persist-on-exit, which found no other replica here.
   grep -qF "persist-on-exit: no other replica seen" "$log"
-  # The adapter's kernel connection died with it: the mount is disconnected.
-  if stat_output="$(stat -- "$mountpoint" 2>&1)" ||
-    [[ "$stat_output" != *"Transport endpoint is not connected"* ]]; then
-    echo "Expected a disconnected mount at $mountpoint, stat said: $stat_output" >&2
+  # The adapter's kernel connection died with it, and the stop unmounted the
+  # disconnected mount it left.
+  grep -qF "$cleared_line" "$log"
+  if is_mountpoint "$mountpoint" || ! stat_output="$(stat -- "$mountpoint" 2>&1)"; then
+    echo "Expected the stop to clear $mountpoint after its adapter was killed: ${stat_output:-still mounted}" >&2
     exit 1
   fi
+  echo "the mount process cleared the mount its killed adapter left"
 
-  log="${log%.log}-remount.log"
+  # A disconnected mount that nothing cleared: the mount process is stopped
+  # when its adapter is killed, then killed itself.
+  log="${log%.log}-dead.log"
   node "${mount_args[@]}" >"$log" 2>&1 &
   mount_pid="$!"
   wait_for_mounted
   assert_mount_ready
-  grep -qF "unmounted the disconnected mount that an earlier adapter left at $mountpoint" "$log"
+  adapter_pid="$(adapter_of "$mount_pid")"
+  kill -STOP "$mount_pid"
+  killed_at="$(now_ms)"
+  kill -KILL "$adapter_pid"
+  wait_for_gone "$adapter_pid" "$killed_at" 5000 "adapter $adapter_pid, killed,"
+  kill -KILL "$mount_pid"
+  wait "$mount_pid" >/dev/null 2>&1 || true
+  expect_disconnected
+
+  log="${log%-dead.log}-remount.log"
+  node "${mount_args[@]}" >"$log" 2>&1 &
+  mount_pid="$!"
+  wait_for_mounted
+  assert_mount_ready
+  grep -qF "$cleared_line" "$log"
   printf "after remount" >"$mountpoint/remount.txt"
   test "$(cat "$mountpoint/remount.txt")" = "after remount"
   rm "$mountpoint/remount.txt"

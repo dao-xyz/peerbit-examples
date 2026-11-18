@@ -354,6 +354,13 @@ macOS with `unmount`, then a forced one. It leaves a live mount alone. At a
 disconnected mount it cannot prove an adapter of its user left, or fails to
 unmount, it says what it found, names the command to run, and does not mount.
 
+After the adapter exits other than with status 0 (it did not unmount), and
+not on Windows, `peerbit-fs mount` runs
+`peerbit-shared-fs-native --clear-dead-mount --mountpoint <path>` as the first
+step of its stop. That makes the same check and unmount, then exits: 0 when
+nothing is left to clear (it says when it unmounted), 1 with what it found and
+the command to run.
+
 ## POSIX metadata
 
 Shared FS stores a git tree mode (`0644`, `0755` or symlink) and a millisecond

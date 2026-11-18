@@ -11,6 +11,15 @@ such as systemd or launchd only has to watch `mount`:
   open files are saved and persist-on-exit runs. `mount` then exits 70; a
   failed step's 1 is kept over 70, and 70 over 75 and 130. Before, `mount`
   kept running with nothing mounted.
+- On Linux and macOS that stop first unmounts the disconnected mount the
+  killed adapter left, which failed with `Transport endpoint is not connected`
+  on Linux, but only when the mount table shows a mount that a peerbit-fs
+  adapter of the same user left; otherwise `mount` exits 1 and names the
+  command to run. If both processes were killed, the next adapter at that
+  mountpoint makes the same check and unmounts it before mounting. Mounts are
+  now listed with source `peerbit-shared-fs` (on Linux, type
+  `fuse.peerbit-shared-fs`), so a disconnected mount that an earlier adapter
+  release left is not recognized: unmount it by hand.
 - An adapter stopped from outside (`peerbit-fs unmount`, `fusermount -u`,
   `umount`) exits 0, and the mount stops the same way, with exit code 0.
   `peerbit-fs unmount` no longer leaves its `mount` process running.
@@ -19,14 +28,6 @@ such as systemd or launchd only has to watch `mount`:
   Linux the kernel also sends it SIGHUP when its parent exits (a wrapper
   script given as `--native-adapter` should start it with `exec`). On Windows,
   Node already ends the adapter with `mount`, and WinFsp removes the drive.
-- A mountpoint left disconnected by a killed adapter, which fails with
-  `Transport endpoint is not connected` on Linux, no longer blocks the next
-  mount: the next adapter there unmounts it first, but only when the mount
-  table shows a mount that a peerbit-fs adapter of the same user left;
-  otherwise it refuses and names the command to run. Mounts are now listed
-  with source `peerbit-shared-fs` (on Linux, type `fuse.peerbit-shared-fs`),
-  so a disconnected mount that an earlier adapter release left is not
-  recognized: unmount it by hand.
 
 The adapter changes reach users through this CLI version's adapter release
 (`shared-fs-native-v<version>`). No wire or storage format changes.

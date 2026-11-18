@@ -2,7 +2,9 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -182,4 +184,90 @@ func TestHostDeadMountSystemLeavesADirectoryAlone(t *testing.T) {
 	if cleared, err := clearDeadMount(t.TempDir(), hostDeadMountSystem()); cleared || err != nil {
 		t.Fatalf("clearDeadMount = %v, %v", cleared, err)
 	}
+}
+
+// --clear-dead-mount, which peerbit-fs mount runs after its adapter died:
+// exit 0 with nothing left to clear (a line when it unmounted), 1 with the
+// reason and the command to run when it may not or could not unmount.
+func TestRunClearDeadMount(t *testing.T) {
+	ours := &mountEntry{fsType: "fuse.peerbit-shared-fs", source: "peerbit-shared-fs", owner: 1000}
+	tests := []struct {
+		name   string
+		host   fakeDeadMountHost
+		status int
+		output string
+	}{
+		{name: "nothing to clear", host: fakeDeadMountHost{probes: []error{nil}}, status: 0, output: ""},
+		{
+			name:   "cleared",
+			host:   fakeDeadMountHost{probes: []error{errTestDisconnected, nil}, entry: ours},
+			status: 0,
+			output: "peerbit-shared-fs-native: unmounted the disconnected mount that an earlier adapter left at /mnt/peerbit\n",
+		},
+		{
+			name:   "not this user's",
+			host:   fakeDeadMountHost{probes: []error{errTestDisconnected}, entry: &mountEntry{fsType: "fuse.peerbit-shared-fs", source: "peerbit-shared-fs", owner: 0}},
+			status: 1,
+			output: "/mnt/peerbit is disconnected (transport endpoint is not connected), but it is not a mount that a peerbit-fs adapter of this user left: type fuse.peerbit-shared-fs, source peerbit-shared-fs, mounted by user 0. Unmount it (fusermount3 -u /mnt/peerbit), then mount again\n",
+		},
+		{
+			name:   "unmount failed",
+			host:   fakeDeadMountHost{probes: []error{errTestDisconnected}, entry: ours, unmounted: errors.New("fusermount3: busy")},
+			status: 1,
+			output: "could not unmount the disconnected mount that an earlier adapter left at /mnt/peerbit: fusermount3: busy. Unmount it (fusermount3 -u /mnt/peerbit), then mount again\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			host := test.host
+			var stderr strings.Builder
+			if status := runClearDeadMount("/mnt/peerbit", host.system(), &stderr); status != test.status {
+				t.Fatalf("status = %d, want %d (stderr %q)", status, test.status, stderr.String())
+			}
+			if stderr.String() != test.output {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), test.output)
+			}
+		})
+	}
+}
+
+// The adapter's command line: --clear-dead-mount needs only --mountpoint, and
+// leaves a plain directory alone. The test binary runs main as the adapter.
+func TestClearDeadMountFlag(t *testing.T) {
+	directory := t.TempDir()
+	for _, test := range []struct {
+		args   []string
+		status int
+		output string
+	}{
+		{args: []string{"--clear-dead-mount", "--mountpoint", directory}, status: 0, output: ""},
+		{args: []string{"--clear-dead-mount"}, status: 2, output: "usage: "},
+	} {
+		adapter := exec.Command(os.Args[0], "-test.run=^TestAdapterMainHelper$")
+		adapter.Env = append(os.Environ(), "PBFS_ADAPTER_MAIN_ARGS="+strings.Join(test.args, "\n"))
+		output, err := adapter.CombinedOutput()
+		status := 0
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			status = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if status != test.status || !strings.HasPrefix(string(output), test.output) || (test.output == "" && len(output) != 0) {
+			t.Fatalf("adapter %v exited %d with %q, want %d with %q", test.args, status, output, test.status, test.output)
+		}
+	}
+}
+
+// TestAdapterMainHelper runs the adapter's main with the arguments its parent
+// test passes; main exits the process.
+func TestAdapterMainHelper(t *testing.T) {
+	args, ok := os.LookupEnv("PBFS_ADAPTER_MAIN_ARGS")
+	if !ok {
+		t.Skip("helper process for TestClearDeadMountFlag")
+	}
+	os.Args = append([]string{"peerbit-shared-fs-native"}, strings.Split(args, "\n")...)
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	main()
+	t.Fatal("main returned instead of exiting")
 }

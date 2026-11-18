@@ -25,6 +25,12 @@ type ExternalNativeAdapterOptions = {
     profileFile?: string;
     /** How long an exit report waits for the rest of the adapter's stderr. */
     stderrDrainMs?: number;
+    /**
+     * Run the adapter's `--clear-dead-mount` once it exited without
+     * unmounting. Not on Windows, where WinFsp removes the drive of an
+     * adapter that exited.
+     */
+    clearDeadMount?: boolean;
 };
 
 export const NATIVE_ADAPTER_PROFILE_FILE_ENV =
@@ -236,6 +242,53 @@ const stopChild = async (child: ChildProcess, timeoutMs: number) => {
     throw error;
 };
 
+/**
+ * Runs the adapter's `--clear-dead-mount`. An adapter that died left its mount
+ * disconnected, which Linux and macOS keep until it is unmounted. Like an
+ * adapter before it mounts, this unmounts it only when the mount table shows
+ * a peerbit-fs mount of this user there, and otherwise says why and which
+ * command to run.
+ */
+const clearDeadMount = async (
+    spawnAdapter: typeof spawn,
+    command: string,
+    mountpoint: string,
+    timeoutMs: number
+) => {
+    const env = { ...process.env };
+    delete env[NATIVE_ADAPTER_IPC_TOKEN_ENV];
+    delete env[NATIVE_ADAPTER_PARENT_PID_ENV];
+    delete env[NATIVE_ADAPTER_PROFILE_FILE_ENV];
+    const child = spawnAdapter(
+        command,
+        ["--clear-dead-mount", "--mountpoint", mountpoint],
+        { stdio: ["ignore", "ignore", "pipe"], env }
+    );
+    const stderr = keepLastLines(child.stderr, STDERR_TAIL_LINES);
+    const result = await new Promise<number | null | Error>((resolve) => {
+        const timer = setTimeout(() => {
+            child.kill("SIGKILL");
+            resolve(new Error(`it did not finish within ${timeoutMs} ms`));
+        }, timeoutMs);
+        const done = (result: number | null | Error) => {
+            clearTimeout(timer);
+            resolve(result);
+        };
+        child.once("error", done).once("close", done);
+    });
+    const lines = stderr();
+    if (result !== 0) {
+        throw new Error(
+            `Could not clear ${mountpoint}, which the native adapter left disconnected: ${
+                result instanceof Error
+                    ? result.message
+                    : lines.join(" ") || `exit code ${result}`
+            }`
+        );
+    }
+    for (const line of lines) console.error(line);
+};
+
 export const mountExternalNativeAdapter = async (
     command: string,
     ipc: { endpoint: string; token: string },
@@ -246,7 +299,9 @@ export const mountExternalNativeAdapter = async (
     if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
         args.push("--debug");
     }
-    const child = (options.spawnAdapter ?? spawn)(
+    const spawnAdapter = options.spawnAdapter ?? spawn;
+    const exitTimeoutMs = options.exitTimeoutMs ?? 5_000;
+    const child = spawnAdapter(
         command,
         args,
         adapterSpawnOptions(ipc.token, options.profileFile)
@@ -323,7 +378,7 @@ export const mountExternalNativeAdapter = async (
     } catch (startError) {
         stopping = true;
         try {
-            await stopChild(child, options.exitTimeoutMs ?? 5_000);
+            await stopChild(child, exitTimeoutMs);
         } catch (stopError) {
             throw new AggregateError(
                 [startError, stopError],
@@ -341,9 +396,23 @@ export const mountExternalNativeAdapter = async (
          * once unmount() began.
          */
         exited,
+        /**
+         * Stops the adapter, which unmounts and exits 0. One that exited
+         * otherwise did not unmount: its mount is cleared here.
+         */
         async unmount() {
             stopping = true;
-            await stopChild(child, options.exitTimeoutMs ?? 5_000);
+            await stopChild(child, exitTimeoutMs);
+            if (
+                child.exitCode !== 0 &&
+                (options.clearDeadMount ?? process.platform !== "win32")
+            )
+                await clearDeadMount(
+                    spawnAdapter,
+                    command,
+                    mountpoint,
+                    exitTimeoutMs
+                );
         },
     };
 };
