@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yargs from "yargs";
-import { hideBin } from "yargs/helpers";
+import { hideBin, Parser } from "yargs/helpers";
 import { mountExternalNativeAdapter } from "./external-native-adapter.js";
 import {
     describeNativeAdapterInstall,
@@ -1291,9 +1291,87 @@ const awaitConflictResolutionReady = async (
     }
 };
 
-export const runCli = async (args = hideBin(process.argv)) => {
-    installPeerbitRejectionGuard();
-    await yargs(args)
+/** What the refusal of a boolean flag given a value adds, by option. */
+const VALUED_BOOLEAN_HINTS = new Map([
+    ["persist-on-exit", "set the wait with --persist-timeout-ms"],
+]);
+
+/**
+ * The refusal of the first argument before `--` that gives a boolean option
+ * a value: yargs reads any value but true or false as false, so
+ * `conflicts --fail-if-any=1` turned its CI gate off. `booleans` maps each
+ * boolean option of the command to the aliases yargs parsed for it.
+ *
+ * As yargs reads --<name>=<value>, a <name> with a hyphen also sets the
+ * camelCase of <name> (--fail-If-any=1 sets failIfAny) and keeps the value
+ * as given there: a spelling the option reaches only that way takes no value
+ * at all, and neither does --no-<option>=<value>, which yargs does not read
+ * as the option.
+ */
+const valuedBooleanFlagRefusal = (
+    args: readonly string[],
+    booleans: ReadonlyMap<string, readonly string[]>
+) => {
+    const spellings = new Map<string, string>();
+    for (const [option, aliases] of booleans) {
+        for (const spelling of [option, ...aliases]) {
+            spellings.set(spelling, option);
+        }
+    }
+    const owner = (name: string) =>
+        spellings.get(name) ??
+        (name.includes("-")
+            ? spellings.get(Parser.camelCase(name))
+            : undefined);
+    for (const arg of args) {
+        if (arg === "--") break;
+        const flag = /^--([^=]+)=(.*)$/s.exec(arg);
+        if (!flag) continue;
+        const [, name, value] = flag;
+        const option =
+            owner(name) ??
+            (name.startsWith("no-") ? owner(name.slice(3)) : undefined);
+        if (option === undefined) continue;
+        if ((value === "true" || value === "false") && spellings.has(name)) {
+            continue;
+        }
+        const hint = VALUED_BOOLEAN_HINTS.get(option);
+        return `${arg}: --${name} takes no value${hint ? `; ${hint}` : ""}`;
+    }
+    return undefined;
+};
+
+/**
+ * Before validation, for the command being parsed: a refusal becomes the
+ * parse error, which yargs reports as a usage error (the command's usage,
+ * then the message; exit 1) before strict mode calls --no-<option>=<value>
+ * an unknown argument.
+ */
+const refuseValuedBooleanFlags = (
+    parser: yargs.Argv,
+    args: readonly string[]
+) => {
+    // Not in @types/yargs: the options of the command being parsed.
+    const { boolean } = (
+        parser as unknown as { getOptions(): { boolean: string[] } }
+    ).getOptions();
+    const aliases = parser.parsed ? parser.parsed.aliases : {};
+    const refusal = valuedBooleanFlagRefusal(
+        args,
+        new Map(boolean.map((option) => [option, aliases[option] ?? []]))
+    );
+    if (refusal === undefined) return;
+    if (!parser.parsed) throw new Error(refusal);
+    parser.parsed.error = new Error(refusal);
+};
+
+/**
+ * peerbit-fs's parser for `args`, with every command and option. Parse it
+ * without arguments: its boolean flag check reads `args`.
+ */
+export const createCliParser = (args: string[]) => {
+    const parser = yargs(args);
+    return parser
         .scriptName("peerbit-fs")
         .option("directory", {
             alias: "d",
@@ -1622,15 +1700,6 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     argv.persistTimeoutMs,
                     "--persist-timeout-ms"
                 );
-                // yargs reads --persist-on-exit=30000 as false.
-                const valued = args.find((arg) =>
-                    /^--persist-on-exit=(?!(true|false)$)/.test(arg)
-                );
-                if (valued) {
-                    throw new Error(
-                        `${valued}: --persist-on-exit takes no value; set the wait with --persist-timeout-ms`
-                    );
-                }
                 const mountProfileDirectory = resolveMountProfileDirectory(
                     argv.mountProfile
                 );
@@ -2900,6 +2969,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
         )
         .demandCommand(1)
         .strict()
-        .help()
-        .parseAsync();
+        .middleware(() => refuseValuedBooleanFlags(parser, args), true)
+        .help();
+};
+
+export const runCli = async (args = hideBin(process.argv)) => {
+    installPeerbitRejectionGuard();
+    await createCliParser(args).parseAsync();
 };

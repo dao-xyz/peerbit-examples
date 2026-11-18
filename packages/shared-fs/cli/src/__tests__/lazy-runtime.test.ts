@@ -80,6 +80,25 @@ describe("peerbit-fs lazy runtime loading", () => {
         expect(result.stderr).not.toContain(BLOCKED_IMPORT);
     });
 
+    it("refuses a boolean flag given a value as a usage error, without importing the filesystem runtime", async () => {
+        // yargs read --fail-if-any=1 as false, so the gate exited 0.
+        const result = await runProbe([
+            "conflicts",
+            "zb2rh-not-opened",
+            "--fail-if-any=1",
+        ]);
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toBe("");
+        const stderr = result.stderr.trimEnd().split(/\r?\n/);
+        expect(stderr[0]).toBe("peerbit-fs conflicts <address>");
+        expect(stderr.at(-1)).toBe(
+            "--fail-if-any=1: --fail-if-any takes no value"
+        );
+        expect(result.stderr).not.toMatch(/^\s+at /m);
+        expect(result.stderr).not.toContain(BLOCKED_IMPORT);
+    });
+
     it("keeps a current native adapter without importing the filesystem runtime", async () => {
         const prefix = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-lazy-")
