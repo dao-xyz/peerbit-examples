@@ -28,6 +28,7 @@ import {
     type IgnoreAwareFs,
     type SharedFsHandle,
     type SharedFsMountBackend,
+    type SharedFsMountBackendOptions,
     type SharedFsMountBackendTarget,
     type SharedFsNamespaceChange,
 } from "../index.js";
@@ -225,10 +226,14 @@ describe("mount local overlay", () => {
         });
 
     const mount = async (
-        target: SharedFsMountBackendTarget & { address?: string } = fs
+        target: SharedFsMountBackendTarget & { address?: string } = fs,
+        options: Omit<SharedFsMountBackendOptions, "localOverlay"> = {}
     ) => {
         const localOverlay = await openOverlay(target.address ?? fs.address);
-        const backend = createSharedFsMountBackend(target, { localOverlay });
+        const backend = createSharedFsMountBackend(target, {
+            ...options,
+            localOverlay,
+        });
         backends.push(backend);
         return { backend, localOverlay };
     };
@@ -298,7 +303,12 @@ describe("mount local overlay", () => {
     });
 
     it("serves a sealed directory locally with POSIX behaviour", async () => {
-        const { backend } = await mount();
+        // A clock that moves on every reading, from mid-second: a directory
+        // time never runs more than a second ahead of the clock, so with
+        // the wall clock a mount started at a whole second could keep the
+        // root's time through a change made in that same millisecond.
+        let now = 1_700_000_000_500;
+        const { backend } = await mount(fs, { clock: () => (now += 1) });
         const rootTime = (await backend.getattr("/")).mtimeMs;
         await backend.mkdir("/node_modules");
         // A new name under the anchor moves the anchor's time.
