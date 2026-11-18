@@ -634,6 +634,38 @@ test("tells whether a sibling finished before or after every peer was ready, by 
     }
 });
 
+test("says a sibling finished before every peer was ready when a presence came after the deadline", async (t) => {
+    // The deadline was 30 s after the peer jobs were created. macOS
+    // reported presence at 40 s, which does not count: when the seed's job
+    // finished, at 45 s, not every peer had been ready.
+    const created = new Date(Date.now() - 60_000);
+    const at = (seconds) => new Date(created.getTime() + seconds * 1000);
+    const { code, lines } = await rendezvous(
+        t,
+        [
+            [
+                plan(),
+                seed({
+                    created,
+                    readyAt: at(10),
+                    ready: true,
+                    status: "completed",
+                    conclusion: "failure",
+                    completed: at(45),
+                }),
+                joiner("macos", { created, readyAt: at(40), ready: true }),
+                joiner("windows", { created, readyAt: at(20), ready: true }),
+            ],
+        ],
+        ["--machine", "windows", "--arrival-timeout-minutes", "0.5"]
+    );
+    assert.equal(code, 1);
+    assert.match(
+        errors(lines)[0],
+        /::Seed peer \(linux\) finished \(failure\) after it reported presence, before every peer was ready, so linux cannot take part in the interop$/
+    );
+});
+
 test("names the peer that finished first, and a job that never got a runner as such", async (t) => {
     // The seed got a runner 19 minutes after the peer jobs were created.
     // By then Windows had failed before its presence, at 3 minutes, and
@@ -710,6 +742,61 @@ test("never names itself as not ready while the listing lags behind its own pres
         assert.match(
             line,
             /, waiting for windows \(Join peer \(windows\): queued, waiting for a runner\)$/
+        );
+    }
+});
+
+test("names only the other missing peers when a sibling finished while the listing lags behind its own presence", async (t) => {
+    // The listing does not show the seed's own presence step yet, and
+    // Windows has failed: of the peers not ready, only macOS is named.
+    const { code, lines } = await rendezvous(t, [
+        [
+            plan(),
+            seed(),
+            joiner("macos", { status: "queued" }),
+            joiner("windows", { status: "completed", conclusion: "failure" }),
+        ],
+    ]);
+    assert.equal(code, 1);
+    assert.match(
+        errors(lines)[0],
+        /::Join peer \(windows\) finished \(failure\) before it reported presence, so windows cannot take part in the interop; also not ready: macos \(Join peer \(macos\): queued, waiting for a runner\)$/
+    );
+});
+
+test("gives up without naming itself while the listing lags behind its own presence", async (t) => {
+    // The deadline, 6 s after the peer jobs were created, and the settle
+    // period have passed, and the listing still does not show the seed's
+    // own presence step.
+    const created = new Date(Date.now() - 10_000);
+    for (const [macos, notReady] of [
+        [
+            { created, status: "queued" },
+            "macos \\(Join peer \\(macos\\): queued, waiting for a runner\\)",
+        ],
+        [
+            { created, ready: true },
+            'none but this job, whose "Report interop presence" step the listing did not show yet',
+        ],
+    ]) {
+        const { code, lines } = await rendezvous(
+            t,
+            [
+                [
+                    plan(),
+                    seed({ created }),
+                    joiner("macos", macos),
+                    joiner("windows", { created, ready: true }),
+                ],
+            ],
+            ["--grace-seconds", "30"]
+        );
+        assert.equal(code, 1);
+        assert.match(
+            errors(lines)[0],
+            new RegExp(
+                `::not every peer was ready 0m06s after the peer jobs were created; not ready: ${notReady}\\. A hosted runner `
+            )
         );
     }
 });
