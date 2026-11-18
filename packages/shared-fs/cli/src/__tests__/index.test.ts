@@ -2599,7 +2599,7 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("detaches the backend and closes the mount profile before stopping Peerbit", async () => {
+    it("detaches the backend and closes the mount profile before persisting and stopping Peerbit", async () => {
         const order: string[] = [];
         const profileWriter = {
             sink: () => {},
@@ -2637,20 +2637,27 @@ describe("peerbit-fs cli", () => {
                 },
             },
             profileWriter,
+            persist: async () => {
+                order.push("persist");
+            },
             stopPeerbit: async () => {
                 order.push("peerbit");
                 if (failures.peerbit) throw failures.peerbit;
             },
         });
-
-        await stopMountSession(session());
-        expect(order).toEqual([
+        const everyStep = [
             "unmount",
             "ipc",
             "dispose",
             "profile",
+            "persist",
             "peerbit",
-        ]);
+        ];
+
+        process.exitCode = undefined;
+        await stopMountSession(session());
+        expect(order).toEqual(everyStep);
+        expect(process.exitCode).toBeUndefined();
 
         // A failing Peerbit shutdown no longer loses the profile summary.
         order.length = 0;
@@ -2658,36 +2665,30 @@ describe("peerbit-fs cli", () => {
         await expect(
             stopMountSession(session({ peerbit: stopFailure }))
         ).rejects.toBe(stopFailure);
-        expect(order).toEqual([
-            "unmount",
-            "ipc",
-            "dispose",
-            "profile",
-            "peerbit",
-        ]);
+        expect(order).toEqual(everyStep);
 
-        // A failing unmount still detaches the backend and closes the
-        // profile before rethrowing.
+        // A failing unmount still saves, persists and stops Peerbit, then
+        // rethrows; exit 1 is set at once.
         order.length = 0;
+        process.exitCode = undefined;
         const unmountFailure = new Error("unmount failed");
         await expect(
-            stopMountSession(session({ unmount: unmountFailure }))
+            stopMountSession(
+                session({ unmount: unmountFailure, peerbit: stopFailure })
+            )
         ).rejects.toBe(unmountFailure);
-        expect(order).toEqual(["unmount", "dispose", "profile"]);
+        expect(order).toEqual(everyStep);
+        expect(process.exitCode).toBe(1);
 
         // The error path runs every step and swallows failures.
         order.length = 0;
+        process.exitCode = undefined;
         await stopMountSession(
             session({ unmount: unmountFailure, peerbit: stopFailure }),
             { ignoreErrors: true }
         );
-        expect(order).toEqual([
-            "unmount",
-            "ipc",
-            "dispose",
-            "profile",
-            "peerbit",
-        ]);
+        expect(order).toEqual(everyStep);
+        expect(process.exitCode).toBeUndefined();
     });
 
     it.each([

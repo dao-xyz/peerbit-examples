@@ -327,6 +327,11 @@ export type SharedFsMountBackend = {
      * backends always have it.
      */
     dispose?(): void;
+    /**
+     * Release every open descriptor as a close would (buffered bytes commit),
+     * at shutdown once the adapter detached. Resolves with what failed.
+     */
+    drain?(): Promise<{ failed: Array<{ path: string; error: unknown }> }>;
 };
 
 export type SharedFsBackendErrorCode =
@@ -4267,6 +4272,16 @@ export const createSharedFsMountBackend = (
                     }
                 }
             });
+        },
+
+        async drain() {
+            const failed: Array<{ path: string; error: unknown }> = [];
+            for (const [handle, { state }] of [...handles]) {
+                await backend
+                    .release(handle)
+                    .catch((error) => failed.push({ path: state.path, error }));
+            }
+            return { failed };
         },
 
         dispose() {

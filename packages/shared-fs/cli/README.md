@@ -558,6 +558,36 @@ dialled or no `--bootstrap` node answers. The options apply to `mount`,
 address connect to nothing. `--no-replicate` reads that skip the public network
 still dial `--peer` and `--bootstrap`.
 
+## Stop a mount: persist-on-exit
+
+Ctrl-C, SIGTERM, SIGHUP, Ctrl-Break (Windows) or a `shutdown` line on a piped
+stdin stops `mount`: the adapter detaches, files still open are saved, and,
+if another replica of the filesystem was seen in this session, `mount` waits
+up to `--persist-timeout-ms` (default 30000) until another replica holds each
+entry it wrote in this session and the names of the files and directories it
+changed and of every directory above them (an earlier run's names too). With
+no replica seen it does not wait and says so. An earlier run's own files are
+not covered if it was killed. The wait sends the
+whole session again (on loopback about 4,000 entries, or 64 MiB, in a second):
+raise the timeout for long sessions or slow links. `--no-persist-on-exit`
+skips the wait only.
+
+A second request aborts the wait while it runs (the list is printed, then
+`mount` exits at once, without stopping Peerbit) and otherwise exits at once.
+One within 100 ms of the last is taken for the copy of a Ctrl-C that npm, pnpm
+and npx pass on: it only prints a hint. Windows has no SIGTERM: `taskkill` and
+`child.kill()` skip all this, so send `shutdown`; a closed console window
+leaves about 10 s.
+
+Exit codes: 0 stopped; 1 failed, or an open file could not be saved
+(`persist-on-exit: unsaved {"path":...}`); 75 the wait gave up, with one
+`persist-on-exit: unacknowledged {"path":...,"ids":[...]}` line per path (ids
+with no path: `"path":null`; 200, then `unlisted {"paths":n}`) for writes
+that stay saved here with no receipt; 130 a second request stopped it. 1 is
+kept over 75 and 130, and 75 over 130. Unlike `prepare-disposal`, it fences
+only this session's own writes, while other writers keep writing; retire a
+machine with `prepare-disposal`.
+
 ## Safely dispose of a machine
 
 Stop mounted writes, wait for persisted delivery, and only then dispose of the
