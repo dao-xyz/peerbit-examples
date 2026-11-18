@@ -316,9 +316,10 @@ userspace, and time after callback return are not observable here.
 ## Mount lifecycle
 
 `peerbit-fs mount` starts the adapter, stops it with SIGINT (on Windows it
-terminates it), and treats any other exit after readiness as a failure (exit
-status 70). The adapter, in turn, ends its mount when `peerbit-fs mount` is
-gone, however that process ended:
+terminates it), and ends the mount on any other exit after readiness: exit
+status 70, or 0 when the adapter exited 0 because it was unmounted from
+outside. The adapter, in turn, ends its mount when `peerbit-fs mount` is gone,
+however that process ended:
 
 - Every adapter opens a second IPC connection, negotiated like the first,
   that carries no requests. The operating system closes the sockets of a
