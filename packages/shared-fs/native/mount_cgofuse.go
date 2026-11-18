@@ -21,7 +21,7 @@ type peerbitFS struct {
 	debug   bool
 	profile *mountProfiler
 	ready   sync.Once
-	mounted *mountWatcher
+	mounted attachWaiter
 	stop    *mountStop
 	unmount func()
 }
