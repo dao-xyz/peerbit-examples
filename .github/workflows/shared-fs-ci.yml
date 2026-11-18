@@ -175,6 +175,12 @@ jobs:
             - name: Check formatting
               run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-mount-profile-summary*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-interop-*.mjs scripts/shared-fs-strict-tests scripts/install-winfsp.test.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-cross-os-interop.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
+            # A change to either workflow or to an interop script runs this
+            # job, so it checks the interop workflow's settings too.
+            - name: Test interop workflow settings
+              if: ${{ !cancelled() }}
+              run: node --test scripts/shared-fs-interop-workflow.test.mjs
+
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})
         runs-on: ${{ matrix.os }}

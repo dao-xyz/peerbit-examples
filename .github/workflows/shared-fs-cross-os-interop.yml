@@ -138,21 +138,26 @@ jobs:
                   # A joiner may spend a window on write readiness and another
                   # on the files, then reports and stops.
                   join_step=$((2 * window + 5))
-                  # The peer jobs' step limits for install and build.
+                  # The peer jobs' step limits for install and build, and the
+                  # minute past the arrival deadline in which the peers wait
+                  # for the listing to show presence from before it (the
+                  # rendezvous script's default --settle-seconds).
+                  # scripts/shared-fs-interop-workflow.test.mjs checks them
+                  # against those steps and that default.
                   install=10
                   build=5
+                  settle=1
                   # A peer job's limit adds up checkout and tool setup (5),
                   # install and build, the wait for every peer (the arrival
-                  # budget, and the minute past its deadline in which the
-                  # peers wait for the listing to show presence from before
-                  # it), the seed's start or a joiner's address download (15;
-                  # step limits cap both), the interop (the join step's limit;
-                  # the seed stops waiting a window + 5 after its start) and
-                  # teardown (5). The arrival budget counts from when the peer
-                  # jobs were created, so it already holds a job's own queue,
-                  # setup and build: no peer's job reaches its limit while a
-                  # peer that arrived within the budget can still need it.
-                  peer_job=$((5 + install + build + arrival + 1 + 15 + join_step + 5))
+                  # budget and the settle minute), the seed's start or a
+                  # joiner's address download (15; step limits cap both), the
+                  # interop (the join step's limit; the seed stops waiting a
+                  # window + 5 after its start) and teardown (5). The arrival
+                  # budget counts from when the peer jobs were created, so it
+                  # already holds a job's own queue, setup and build: no peer's
+                  # job reaches its limit while a peer that arrived within the
+                  # budget can still need it.
+                  peer_job=$((5 + install + build + arrival + settle + 15 + join_step + 5))
                   if [ "$peer_job" -gt 360 ]; then
                     echo "::error::A peer job would need up to ${peer_job} minutes, past the 360 a hosted job may run: lower timeout_minutes or arrival_timeout_minutes"
                     exit 1
