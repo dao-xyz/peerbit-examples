@@ -147,6 +147,19 @@ jobs:
               shell: bash
               run: node scripts/shared-fs-local-overlay-npm-smoke.mjs
 
+            - name: Print npm overlay smoke logs
+              if: failure()
+              shell: bash
+              run: |
+                  # The smoke prints a failure's details itself; this also
+                  # covers a smoke the step timeout stopped.
+                  for log in "$RUNNER_TEMP"/shared-fs-npm-smoke/driver.log "$RUNNER_TEMP"/shared-fs-npm-smoke/session-*.log; do
+                    [ -f "$log" ] || continue
+                    echo "::group::$(basename "$log"), last 200 lines"
+                    tail -n 200 "$log"
+                    echo "::endgroup::"
+                  done
+
             - name: Upload npm overlay smoke evidence
               if: failure()
               uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -368,6 +381,22 @@ jobs:
             - name: Install an npm project through the mount's local overlay
               timeout-minutes: 25
               run: node scripts/shared-fs-local-overlay-npm-smoke.mjs
+
+            - name: Print npm overlay smoke logs
+              if: failure()
+              run: |
+                  # The smoke prints a failure's details itself; this also
+                  # covers a smoke the step timeout stopped.
+                  $Evidence = Join-Path $env:RUNNER_TEMP "shared-fs-npm-smoke"
+                  if (Test-Path $Evidence) {
+                    Get-ChildItem $Evidence -Filter *.log |
+                      Where-Object { $_.Name -eq "driver.log" -or $_.Name -like "session-*" } |
+                      ForEach-Object {
+                        Write-Output "::group::$($_.Name), last 200 lines"
+                        Get-Content $_.FullName -Tail 200
+                        Write-Output "::endgroup::"
+                      }
+                  }
 
             - name: Upload npm overlay smoke evidence
               if: failure()
