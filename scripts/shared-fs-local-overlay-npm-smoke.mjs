@@ -19,6 +19,11 @@
  * exited 0 with nothing to persist. Evidence goes to
  * $RUNNER_TEMP/shared-fs-npm-smoke. Every deadline is a give-up bound,
  * never a performance gate.
+ *
+ * Session 1 runs the adapter with debug output, which logs each FUSE
+ * operation and its result. A failure prints the error's code, errno,
+ * syscall and path, and for the last session and any still running whether
+ * its mountpoint is mounted and the end of its output.
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -357,6 +362,8 @@ const unmountSync = (mountpoint) => {
 };
 
 const sessions = new Set();
+/** Every session started, in order. */
+const startedSessions = [];
 /** Every mountpoint a session used: a directory, or a drive on Windows. */
 const mountpoints = [];
 
@@ -383,7 +390,7 @@ const killTree = (child) => {
  */
 const startSession = async (
     number,
-    { witness, mountpoint, state, adapter }
+    { witness, mountpoint, state, adapter, env = {} }
 ) => {
     const label = `session ${number}`;
     const stdoutFile = path.join(evidence, `session-${number}.stdout.log`);
@@ -406,7 +413,7 @@ const startSession = async (
         ],
         {
             cwd: repo,
-            env: { ...process.env, FORCE_COLOR: "0" },
+            env: { ...process.env, FORCE_COLOR: "0", ...env },
             stdio: ["pipe", "pipe", "pipe"],
             // A process group, so a forced stop reaches the adapter too.
             detached: !windows,
@@ -415,6 +422,7 @@ const startSession = async (
     );
     const session = {
         number,
+        mountpoint,
         child,
         started: Date.now(),
         stdout: "",
@@ -422,6 +430,7 @@ const startSession = async (
         overlayLines: [],
     };
     sessions.add(session);
+    startedSessions.push(session);
     let partial = "";
     let mounted;
     const mountedLine = new Promise((resolve) => (mounted = resolve));
@@ -435,7 +444,10 @@ const startSession = async (
             if (line.startsWith("Local overlay: ")) {
                 session.overlayLines.push(line);
             }
-            if (line.startsWith("Mounted ")) mounted(line);
+            if (line.startsWith("Mounted ")) {
+                session.mountedLineAt ??= Date.now();
+                mounted(line);
+            }
         }
     });
     child.stderr.on("data", (chunk) => {
@@ -504,6 +516,51 @@ const persistLines = (session) =>
     session.stderr
         .split(/\r?\n/)
         .filter((line) => line.startsWith("persist-on-exit:"));
+
+/** A Node system error's code, errno, syscall and paths, when it has them. */
+const errorFields = (error) => {
+    const fields = {};
+    for (const key of ["code", "errno", "syscall", "path", "dest"]) {
+        if (error?.[key] !== undefined) fields[key] = error[key];
+    }
+    return Object.keys(fields).length ? fields : undefined;
+};
+
+/**
+ * Log what a failure leaves to read: the error's fields and, for the last
+ * session and any still running, whether its mountpoint is mounted (looked
+ * at once) and the end of its output, the adapter's debug lines included.
+ */
+const describeFailure = (error) => {
+    const fields = errorFields(error);
+    if (fields) log(`failure: ${JSON.stringify(fields)}`);
+    const described = new Set([...sessions, startedSessions.at(-1)]);
+    described.delete(undefined);
+    for (const session of described) {
+        const exit = session.child.exitCode ?? session.child.signalCode;
+        const state = exit === null ? "running" : `exited ${exit}`;
+        let mounted;
+        try {
+            mounted = mountedAt(session.mountpoint) ? "mounted" : "not mounted";
+        } catch (lookError) {
+            mounted = `unknown (${lookError.message})`;
+        }
+        const since =
+            session.mountedLineAt === undefined
+                ? "before its Mounted line"
+                : `${Date.now() - session.mountedLineAt} ms after its Mounted line`;
+        log(
+            `session ${session.number} (${state}): ${session.mountpoint} is ${mounted} at the failure, ${since}`
+        );
+        log(
+            `session ${session.number} stdout, last 4000 characters:\n${session.stdout.slice(-4000)}`
+        );
+        log(
+            `session ${session.number} stderr, last 8000 characters:\n${session.stderr.slice(-8000)}`
+        );
+    }
+    return fields;
+};
 
 // ---- the run -------------------------------------------------------------
 
@@ -627,7 +684,12 @@ const main = async () => {
         let before;
         await step("session 1: seed /npm-app", async () => {
             const { mountpoint, root } = nextMountpoint();
-            const session = await startSession(1, { ...options(), mountpoint });
+            const session = await startSession(1, {
+                ...options(),
+                mountpoint,
+                // A few operations, so the adapter's debug log stays short.
+                env: { PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: "1" },
+            });
             overlayDirectories.push(session.overlayDirectory);
             mkdirSync(path.join(root, "npm-app"));
             for (const [file, bytes] of Object.entries(seedFiles)) {
@@ -824,6 +886,7 @@ const main = async () => {
     } catch (error) {
         result.ok = false;
         result.error = String(error?.stack ?? error);
+        result.errorFields = describeFailure(error);
         throw error;
     } finally {
         for (const session of [...sessions]) await forceStop(session);
