@@ -578,8 +578,10 @@ changed and of every directory above them (an earlier run's names too). With
 no replica seen it does not wait and says so. An earlier run's own files are
 not covered if it was killed. The wait sends the
 whole session again (on loopback about 4,000 entries, or 64 MiB, in a second):
-raise the timeout for long sessions or slow links. `--no-persist-on-exit`
-skips the wait only.
+raise the timeout for long sessions or slow links. A replica on Windows that
+comes back during the wait can take longer than 30 s to confirm a few hundred
+entries: raise the timeout for that too. `--no-persist-on-exit` skips the wait
+only.
 
 A second request aborts the wait while it runs (the list is printed, then
 `mount` exits at once, without stopping Peerbit) and otherwise exits at once.
