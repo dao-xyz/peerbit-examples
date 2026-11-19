@@ -1,5 +1,81 @@
 # @peerbit/shared-fs-cli
 
+## 0.19.0
+
+### Minor Changes
+
+- cea4460: `peerbit-fs conflicts --fail-if-any` gates CI on conflicts: it exits with
+  status 3 when the local view holds any conflict, content or naming; with 0
+  when it holds none in a view verified complete (a full replica joined
+  through a verified snapshot bootstrap); and with 4 when it holds none in any
+  other view, since absence there proves nothing. `--allow-unverified` accepts
+  such a view and exits 0. Errors still exit with 1. It prints the content
+  listing as before, then each naming conflict's type and path, and with
+  `--json` adds a `namingConflicts` array. `--path` scopes both kinds.
+  `naming-conflicts` takes no such flag: one gate covers every kind.
+
+    A mount now shows naming conflicts under `/.peerbit-conflicts` as well, in a
+    new flat, read-only layout that `/` no longer lists (see `@peerbit/shared-fs`).
+    This replaces the old layout without a compatibility window, a break allowed
+    because shared-fs has no production users.
+
+- 18125fd: A Mac with FUSE-T but not macFUSE can no longer mount. Before, the native
+  adapter's cgofuse loaded FUSE-T when macFUSE was absent, and the adapter
+  mounted through it with `-o noattrcache`. Now `peerbit-fs mount` refuses at
+  once, before it looks for the adapter, opens Peerbit or waits for write
+  readiness, and exits 1 with one line:
+
+    ```
+    FUSE-T is not supported: install macFUSE (brew install --cask macfuse) to mount on macOS; FUSE-T can stay installed. Found FUSE-T's /usr/local/lib/libfuse-t.dylib but not macFUSE's /usr/local/lib/libfuse.2.dylib or /usr/local/lib/libosxfuse.2.dylib.
+    ```
+
+    `status` reports native mounts as unavailable there, with macFUSE missing and
+    the same text as a note. The adapter itself refuses with that text before it
+    connects or mounts, whichever CLI starts it. Shared-fs does not support
+    FUSE-T: it is licensed for non-commercial use only, and shared-fs CI does not
+    test it. A Mac with macFUSE, with or without FUSE-T, mounts as before. The
+    adapter change reaches users through this CLI version's adapter release
+    (`shared-fs-native-v<version>`). No wire or storage format changes.
+
+- 966915c: `mount` saves files still open at shutdown and, once another replica of the
+  filesystem was seen in the session, waits for a remote receipt for each entry
+  the mount wrote in that session (`--persist-on-exit`, on by default;
+  `--persist-timeout-ms`, default 30000; `--no-persist-on-exit` skips the
+  wait; `--persist-on-exit=<value>` is refused). It exits 75 and lists the
+  unacknowledged paths on stderr (200, then a count) when the wait gives up. A
+  second request aborts the wait while it runs and otherwise exits at once
+  (130); one within 100 ms of the last is taken for the copy of a Ctrl-C that
+  npm, pnpm and npx pass on and only prints a hint. SIGHUP stops a mount too, a
+  `shutdown` line on a piped stdin and Ctrl-Break stop it on Windows, which has
+  no SIGTERM, and a failed unmount no longer skips the save and the wait. Exit
+  1 (a failure, or an open file that could not be saved, now reported as
+  `persist-on-exit: unsaved`) is kept over 75 and 130.
+
+### Patch Changes
+
+- cc23e99: A boolean flag given a value other than `true` or `false` is now refused
+  instead of being read as false. Before,
+  `peerbit-fs conflicts <address> --fail-if-any=1` silently turned the CI gate
+  off and exited 0 over a conflict, and `create --auth=1`, `gc --dry-run=1` or
+  `mount --require-fresh=1` ran as if the flag were off. Every boolean option
+  of every command, in each spelling (`--fail-if-any=1`, `--failIfAny=1`),
+  now gives a usage error before the command runs: the command's usage, then
+  one line naming the flag, such as
+  `--fail-if-any=1: --fail-if-any takes no value`, and exit 1.
+  `--no-<flag>=<value>`, already refused as an unknown argument, gets the same
+  kind of line. So do a dotted name in any form, such as
+  `mount --assume-complete.x=0` or `--no-assume-complete.x`, and a spelling
+  yargs only camel-cases onto the option given a value, such as
+  `--assume-Complete false`, each of which turned the override on.
+  `--persist-on-exit=<value>` keeps its hint to set the wait with
+  `--persist-timeout-ms`. `--fail-if-any`, `--no-fail-if-any`,
+  `--fail-if-any=true` and `--fail-if-any=false` work as before, other options
+  keep their values, and arguments after `--` are passed on unchecked.
+- Updated dependencies [cea4460]
+- Updated dependencies [966915c]
+- Updated dependencies [18125fd]
+    - @peerbit/shared-fs@0.19.0
+
 ## 0.18.0
 
 ### Minor Changes
