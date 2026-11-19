@@ -316,7 +316,10 @@ reported.
 
 On Windows PowerShell, mount at a free drive letter, or at a directory that
 does not exist yet (WinFsp creates it, and refuses one that exists). `Mounted`
-is printed once a drive letter exists; a directory can appear just after it.
+is printed once a drive letter exists. A directory is not waited for: just
+after `Mounted` it can still be missing or not yet lead to the mount, and
+accesses through it can fail with `ECANCELED` until WinFsp serves it, so a
+script that acts on `Mounted` should mount at a drive letter.
 
 ```powershell
 peerbit-fs status

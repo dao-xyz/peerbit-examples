@@ -75,7 +75,10 @@ it opens a hidden window for the `WM_DEVICECHANGE` arrival that
 when the wait starts and after each arrival. It stops waiting after 10 s: if
 the letter is defined by then, it prints that no arrival reached it and
 reports ready; if not, it could not confirm the mount. A directory mountpoint
-on Windows is not waited for.
+on Windows is not waited for. WinFsp creates the directory after init and
+serves it only once its dispatcher runs, so just after `Mounted` the directory
+can be missing and accesses through it can fail with `ECANCELED`; mount at a
+drive letter when something acts on `Mounted`.
 
 The endpoint is provided by the TypeScript Peerbit daemon: on Linux a Unix
 socket in a new owner-only directory, which other local users cannot reach and

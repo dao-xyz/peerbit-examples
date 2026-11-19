@@ -11,6 +11,8 @@ with `QueryDosDeviceW`, and it stops waiting after 10 s. If the letter is
 still not defined then, or the adapter cannot otherwise confirm a mount, it
 says so and never reports ready, so `mount` fails at its readiness limit
 instead of printing `Mounted`. A directory mountpoint on Windows is not
-waited for. The fix reaches users through this CLI version's adapter release
+waited for: just after `Mounted` it can be missing, and accesses through it
+can fail with `ECANCELED` until WinFsp serves it, so scripts should mount at a
+drive letter. The fix reaches users through this CLI version's adapter release
 (`shared-fs-native-v<version>`). The README's Windows example now mounts at a
 drive letter: it created the mount directory first, which WinFsp refuses.
