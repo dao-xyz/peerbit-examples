@@ -13,6 +13,18 @@ type attachWaiter interface {
 	wait() error
 }
 
+// reportReady writes the ready line once mounted reports the mount attached.
+// When the wait fails it says why and writes no ready line: peerbit-fs mount
+// then fails at its readiness limit instead of printing Mounted for a mount
+// that may not be there.
+func reportReady(mounted attachWaiter, stdout, stderr io.Writer) {
+	if err := mounted.wait(); err != nil {
+		fmt.Fprintf(stderr, "peerbit-shared-fs-native could not confirm the mount is attached: %v\n", err)
+		return
+	}
+	fmt.Fprintln(stdout, "peerbit-shared-fs-native ready")
+}
+
 // driveWaitLimit bounds the wait for a drive letter. WinFsp defines it as
 // soon as init and its probes of the root return; the CLI gives the adapter
 // 15 s to report ready.

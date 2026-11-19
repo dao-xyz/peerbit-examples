@@ -62,13 +62,10 @@ func TestReadyLineWaitsForTheDriveLetterInWinFspOrder(t *testing.T) {
 	ready := false
 	t.Cleanup(func() {
 		// A test that failed before the ready line leaves the wait blocked:
-		// release it, and let the adapter write before stdout is restored.
+		// release it. Init gave the wait this test's stdout pipe, so a line it
+		// writes later cannot reach the real stdout.
 		if !ready {
 			deadline <- time.Time{}
-			select {
-			case <-stdout:
-			case <-time.After(patience):
-			}
 		}
 	})
 	noReadyLine := func(when string) {

@@ -188,12 +188,7 @@ func (fs *peerbitFS) Init() {
 		fs.stop.mounted(fs.unmount)
 		// Report ready only once the mount is attached (see mountWatcher),
 		// off the callback thread so that Init returns first.
-		go func() {
-			if err := fs.mounted.wait(); err != nil {
-				fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native could not confirm the mount is attached: %v\n", err)
-			}
-			fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")
-		}()
+		go reportReady(fs.mounted, os.Stdout, os.Stderr)
 	})
 }
 

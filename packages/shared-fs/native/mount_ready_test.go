@@ -254,3 +254,49 @@ type failingWatch struct{ err error }
 func (f failingWatch) defined(string) (bool, error) { return false, nil }
 
 func (f failingWatch) watch(func()) (func(), error) { return nil, f.err }
+
+// pastDeadline makes w's limit pass before its wait looks at the table.
+func pastDeadline(w *driveWatcher) {
+	deadline := make(chan time.Time, 1)
+	deadline <- time.Time{}
+	w.after = func(time.Duration) <-chan time.Time { return deadline }
+}
+
+func TestReadyLineOnlyForAConfirmedMount(t *testing.T) {
+	const ready = "peerbit-shared-fs-native ready\n"
+	t.Run("letter defined", func(t *testing.T) {
+		drives := newFakeDrives()
+		drives.define("P:")
+		w, _ := newTestDriveWatcher(t, drives)
+		var stdout, stderr bytes.Buffer
+		reportReady(w, &stdout, &stderr)
+		if stdout.String() != ready || stderr.Len() != 0 {
+			t.Fatalf("stdout %q, stderr %q; want only the ready line", stdout.String(), stderr.String())
+		}
+	})
+	t.Run("letter defined without a notice by the limit", func(t *testing.T) {
+		drives := newFakeDrives()
+		// P: is defined just after the first check, and its arrival is lost.
+		drives.duringCheck = func() { drives.define("P:") }
+		w, notes := newTestDriveWatcher(t, drives)
+		pastDeadline(w)
+		var stdout, stderr bytes.Buffer
+		reportReady(w, &stdout, &stderr)
+		if stdout.String() != ready || stderr.Len() != 0 || !strings.Contains(notes.String(), "no arrival notice") {
+			t.Fatalf("stdout %q, stderr %q, notes %q; want the ready line after the lost notice's note", stdout.String(), stderr.String(), notes.String())
+		}
+	})
+	t.Run("letter not defined by the limit", func(t *testing.T) {
+		drives := newFakeDrives()
+		w, _ := newTestDriveWatcher(t, drives)
+		pastDeadline(w)
+		var stdout, stderr bytes.Buffer
+		reportReady(w, &stdout, &stderr)
+		if stdout.Len() != 0 {
+			t.Fatalf("wrote %q for a drive that was never defined; want no ready line", stdout.String())
+		}
+		if want := "peerbit-shared-fs-native could not confirm the mount is attached: drive P: was not defined within 1h0m0s\n"; stderr.String() != want {
+			t.Fatalf("stderr %q, want %q", stderr.String(), want)
+		}
+	})
+}

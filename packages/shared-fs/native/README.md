@@ -65,15 +65,17 @@ process it starts inherits it.
 
 The adapter writes `peerbit-shared-fs-native ready` to stdout once the mount
 is attached, and `peerbit-fs mount` prints `Mounted` only after that line.
+When the adapter cannot confirm the mount, it prints why and writes no ready
+line, so `peerbit-fs mount` fails at its 15 s readiness limit instead.
 Linux FUSE and macFUSE call the filesystem's init once the kernel has attached
 the mount, but WinFsp calls it before it creates the volume and defines the
 drive letter. So on Windows the adapter waits for the letter: before it mounts
 it opens a hidden window for the `WM_DEVICECHANGE` arrival that
 `DefineDosDevice` broadcasts, and it checks the letter with `QueryDosDeviceW`
-when the wait starts and after each arrival. It stops waiting after 10 s and
-reports ready either way, first printing that no arrival reached it (the letter
-is defined) or that it could not confirm the mount. A directory mountpoint on
-Windows is not waited for.
+when the wait starts and after each arrival. It stops waiting after 10 s: if
+the letter is defined by then, it prints that no arrival reached it and
+reports ready; if not, it could not confirm the mount. A directory mountpoint
+on Windows is not waited for.
 
 The endpoint is provided by the TypeScript Peerbit daemon: on Linux a Unix
 socket in a new owner-only directory, which other local users cannot reach and
