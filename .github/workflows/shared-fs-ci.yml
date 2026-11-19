@@ -4,6 +4,7 @@ on:
     pull_request:
         paths:
             - ".github/workflows/shared-fs-ci.yml"
+            - ".github/workflows/shared-fs-native-cross-os-interop.yml"
             - ".github/workflows/shared-fs-native-os-smoke.yml"
             - ".github/workflows/shared-fs-native-smoke.yml"
             - "package.json"
@@ -18,10 +19,12 @@ on:
             - "scripts/shared-fs-strict-tests/**"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
+            - "scripts/install-winfsp*"
     push:
         branches: [master]
         paths:
             - ".github/workflows/shared-fs-ci.yml"
+            - ".github/workflows/shared-fs-native-cross-os-interop.yml"
             - ".github/workflows/shared-fs-native-os-smoke.yml"
             - ".github/workflows/shared-fs-native-smoke.yml"
             - "package.json"
@@ -36,6 +39,7 @@ on:
             - "scripts/shared-fs-strict-tests/**"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
+            - "scripts/install-winfsp*"
     workflow_dispatch:
 
 permissions:
@@ -110,25 +114,30 @@ jobs:
             - name: Test mount profile summarizer
               run: node --test scripts/shared-fs-mount-profile-summary.test.mjs
 
+            - name: Test WinFsp install step
+              run: node --test scripts/install-winfsp.test.mjs
+
             - name: Validate native smoke wrapper syntax
               if: runner.os != 'Windows'
               shell: bash
               run: bash -n scripts/shared-fs-external-native-smoke.sh
 
-            - name: Validate native PowerShell smoke wrapper syntax
+            - name: Validate native PowerShell script syntax
               if: runner.os == 'Windows'
               shell: powershell
               run: |
-                  $Tokens = $null
-                  $Errors = $null
-                  [System.Management.Automation.Language.Parser]::ParseFile(
-                    (Resolve-Path "scripts/shared-fs-external-native-smoke.ps1"),
-                    [ref] $Tokens,
-                    [ref] $Errors
-                  ) | Out-Null
-                  if ($Errors.Count -gt 0) {
-                    $Errors | ForEach-Object { Write-Error $_.Message }
-                    throw "PowerShell smoke wrapper has parser errors"
+                  foreach ($Script in @("scripts/shared-fs-external-native-smoke.ps1", "scripts/install-winfsp.ps1")) {
+                    $Tokens = $null
+                    $Errors = $null
+                    [System.Management.Automation.Language.Parser]::ParseFile(
+                      (Resolve-Path $Script),
+                      [ref] $Tokens,
+                      [ref] $Errors
+                    ) | Out-Null
+                    if ($Errors.Count -gt 0) {
+                      $Errors | ForEach-Object { Write-Error $_.Message }
+                      throw "$Script has parser errors"
+                    }
                   }
 
             - name: Typecheck shared-fs tests
@@ -160,7 +169,7 @@ jobs:
               run: pnpm install --frozen-lockfile
 
             - name: Check formatting
-              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-mount-profile-summary*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-strict-tests .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
+              run: pnpm exec prettier --check packages/shared-fs scripts/shared-fs-native-mount-benchmark*.mjs scripts/shared-fs-mount-profile-summary*.mjs scripts/shared-fs-node-go-ipc-benchmark*.mjs scripts/shared-fs-strict-tests scripts/install-winfsp.test.mjs .github/workflows/shared-fs-ci.yml .github/workflows/shared-fs-native-smoke.yml .github/workflows/shared-fs-native-os-smoke.yml
 
     native-adapter:
         name: Native adapter checks (${{ matrix.os }})

@@ -7,8 +7,10 @@ GitHub-hosted runners, on every shared-fs pull request and push to master:
   `ubuntu-26.04` (libfuse 3.18, `libfuse3.so.4`). The labels are pinned so
   each soname the adapter loads stays covered, and a step fails unless the
   image provides only its expected soname.
-- Windows: WinFsp on `windows-2025` and `windows-2022`, installed with
-  Chocolatey. The smoke builds the adapter without cgo, as releases do.
+- Windows: WinFsp on `windows-2025` and `windows-2022`, installed by
+  `scripts/install-winfsp.ps1` from WinFsp's GitHub release MSI, which must
+  match the size and SHA-256 the workflow pins. The smoke builds the adapter
+  without cgo, as releases do.
 
 A manual run of the same workflow can add the mounted and local-control
 filesystem benchmarks, the developer workload, and (Linux only) the A-B-B-A
