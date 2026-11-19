@@ -22,11 +22,12 @@
  * $RUNNER_TEMP/shared-fs-npm-smoke. Every deadline is a give-up bound,
  * never a performance gate.
  *
- * Session 1 runs the adapter with debug output, which logs each FUSE
- * operation and its result. A failure prints the error's code, errno,
- * syscall and path, and for the last session and any still running whether
- * its mountpoint is mounted then and, once cleanup stopped it, the end of its
- * output.
+ * Session 1 runs the adapter with debug output: its own lines and the FUSE
+ * layer's log of each request and its result (libfuse's operations on Linux,
+ * WinFsp's file system requests on Windows). A failure prints the error's
+ * code, errno, syscall and path, and for the last session and any still
+ * running whether its mountpoint is mounted then and, once cleanup stopped
+ * it, the end of its output.
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
