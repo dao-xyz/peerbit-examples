@@ -16,7 +16,9 @@
  *   3. remount: the install still loads and runs.
  * After sessions 2 and 3, W holds exactly what it held after the seed (its
  * bootstrap manifests aside) and counted no other change, and each mount
- * exited 0 with nothing to persist. Evidence goes to
+ * exited 0 with nothing to persist. No session's adapter may say that it
+ * reported ready without seeing its mount attach (on Windows, without
+ * hearing its drive letter arrive). Evidence goes to
  * $RUNNER_TEMP/shared-fs-npm-smoke. Every deadline is a give-up bound,
  * never a performance gate.
  *
@@ -74,6 +76,15 @@ const GIVE_UP_MS = {
 /** The one persist-on-exit line a session that wrote nothing may print. */
 const PERSIST_NOTHING =
     "persist-on-exit: no other replica seen; not waiting (0 entries only here)";
+/**
+ * What the adapter prints when it did not see its mount attach: the drive
+ * letter was defined but its arrival never reached the adapter, so it
+ * reported ready only at its time limit, or it could not confirm the mount.
+ */
+const ATTACH_UNSEEN = [
+    "no arrival notice reached the adapter",
+    "could not confirm the mount is attached",
+];
 /** Document kinds a mount writes for a shared change. */
 const SHARED_KINDS = ["naming", "version", "chunk", "changeset-manifest"];
 const BIN_LINES = ["ov-pkg-002", "ov-pkg-009", "ov-pkg-030"].map(
@@ -480,7 +491,11 @@ const startSession = async (
     return session;
 };
 
-/** Ask the mount to stop (a `shutdown` line) and wait for its exit. */
+/**
+ * Ask the mount to stop (a `shutdown` line) and wait for its exit. Its output
+ * is complete then, so this is where it must not say that the adapter missed
+ * its mount attaching.
+ */
 const stopSession = async (session) => {
     session.child.stdin.write("shutdown\n");
     const { code, signal } = await within(
@@ -491,6 +506,13 @@ const stopSession = async (session) => {
     sessions.delete(session);
     session.exit = { code, signal, ms: Date.now() - session.started };
     log(`session ${session.number}: exit ${code ?? signal}`);
+    const unseen = session.stderr
+        .split(/\r?\n/)
+        .filter((line) => ATTACH_UNSEEN.some((note) => line.includes(note)));
+    expect(
+        unseen.length === 0,
+        `session ${session.number}'s adapter did not see its mount attach:\n${unseen.join("\n")}`
+    );
     return session.exit;
 };
 
