@@ -40,7 +40,7 @@ import {
     rmSync,
     writeFileSync,
 } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -551,11 +551,33 @@ const errorFields = (error) => {
 };
 
 /**
+ * Whether `mountpoint` is mounted, for a failure report. On Windows that
+ * opens the drive's root, which a hung mount answers only when WinFsp cancels
+ * the request minutes later, so the look runs off the event loop and is
+ * given up on.
+ */
+const describeMounted = async (mountpoint) => {
+    if (!windows) return mountedAt(mountpoint) ? "mounted" : "not mounted";
+    return within(
+        stat(`${mountpoint}\\`).then(
+            () => "mounted",
+            (error) =>
+                error.code === "ENOENT"
+                    ? "not mounted"
+                    : `unknown (${error.code ?? error.message})`
+        ),
+        10_000,
+        `a look at ${mountpoint}`
+    );
+};
+
+/**
  * Log what a failure leaves to read at once: the error's fields and, for the
  * last session and any still running, whether it runs and its mountpoint is
  * mounted (looked at once). Returns those sessions for describeOutput.
  */
-const describeFailure = (error) => {
+const describeFailure = async (error) => {
+    const failedAt = Date.now();
     const fields = errorFields(error);
     if (fields) log(`failure: ${JSON.stringify(fields)}`);
     const described = new Set([...sessions, startedSessions.at(-1)]);
@@ -565,14 +587,14 @@ const describeFailure = (error) => {
         const state = exit === null ? "running" : `exited ${exit}`;
         let mounted;
         try {
-            mounted = mountedAt(session.mountpoint) ? "mounted" : "not mounted";
+            mounted = await describeMounted(session.mountpoint);
         } catch (lookError) {
             mounted = `unknown (${lookError.message})`;
         }
         const since =
             session.mountedLineAt === undefined
                 ? "before its Mounted line"
-                : `${Date.now() - session.mountedLineAt} ms after its Mounted line`;
+                : `${failedAt - session.mountedLineAt} ms after its Mounted line`;
         log(
             `session ${session.number} (${state}): ${session.mountpoint} is ${mounted} at the failure, ${since}`
         );
@@ -933,7 +955,7 @@ const main = async () => {
     } catch (error) {
         result.ok = false;
         result.error = String(error?.stack ?? error);
-        const failure = describeFailure(error);
+        const failure = await describeFailure(error);
         result.errorFields = failure.fields;
         described = failure.sessions;
         throw error;
