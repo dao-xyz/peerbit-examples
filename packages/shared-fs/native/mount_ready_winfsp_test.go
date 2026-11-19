@@ -46,7 +46,8 @@ func stdoutLines(t *testing.T) <-chan string {
 // The order is fsp_fuse_loop_start's in WinFsp 2.1: init, the probes that
 // read the root, then the volume, the drive letter and the dispatcher.
 func TestReadyLineWaitsForTheDriveLetterInWinFspOrder(t *testing.T) {
-	fs, requests := recordingFS(t, map[string]interface{}{"mode": float64(0o40755), "nlink": float64(2)})
+	// Every request finds a directory: the root, then the new /npm-app.
+	fs, requests := recordingFS(t, map[string]interface{}{"kind": "directory", "mode": float64(0o40755), "nlink": float64(2)})
 	drives := newFakeDrives()
 	// runNativeMount creates the watcher before host.Mount.
 	watcher, err := newDriveWatcher("P:", drives, time.Hour)
@@ -129,11 +130,39 @@ func TestReadyLineWaitsForTheDriveLetterInWinFspOrder(t *testing.T) {
 	}
 
 	// What a client does on the ready line (the CLI then prints Mounted):
-	// its mkdir reaches the adapter.
+	// CreateDirectory of P:\npm-app. WinFsp 2.1 serves it with a getattr of
+	// the parent for its security, then mkdir, opendir, chown when the
+	// creator's ids differ from the mount's, getattr, and releasedir once the
+	// handle closes (fuse_intf.c); each reaches the backend or is answered
+	// here.
+	if code := fs.Getattr("/", &stat, ^uint64(0)); code != 0 {
+		t.Fatalf("getattr / = %d", code)
+	}
+	expectRequest(t, requests, "getattr", "/")
 	if code := fs.Mkdir("/npm-app", 0o777); code != 0 {
 		t.Fatalf("mkdir /npm-app = %d", code)
 	}
 	expectRequest(t, requests, "mkdir", "/npm-app")
+	code, handle := fs.Opendir("/npm-app")
+	if code != 0 {
+		t.Fatalf("opendir /npm-app = %d", code)
+	}
+	expectRequest(t, requests, "getattr", "/npm-app")
+	if code := fs.Chown("/npm-app", 1000, 1000); code != 0 {
+		t.Fatalf("chown /npm-app = %d", code)
+	}
+	if code := fs.Getattr("/npm-app", &stat, ^uint64(0)); code != 0 || stat.Mode&fuse.S_IFMT != fuse.S_IFDIR {
+		t.Fatalf("getattr /npm-app = %d, mode %o; want a directory", code, stat.Mode)
+	}
+	expectRequest(t, requests, "getattr", "/npm-app")
+	if code := fs.Releasedir("/npm-app", handle); code != 0 {
+		t.Fatalf("releasedir /npm-app = %d", code)
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("an unexpected %s %v reached the backend", request.Op, request.Args)
+	default:
+	}
 	if drives.stopCount() != 1 {
 		t.Fatalf("the watcher stopped %d times, want once", drives.stopCount())
 	}
