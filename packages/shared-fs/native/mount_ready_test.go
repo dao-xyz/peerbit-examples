@@ -13,6 +13,12 @@ import (
 // only gives up, so it is generous.
 const patience = 30 * time.Second
 
+// quietWindow is how long a test watches for a check that must not come. The
+// wait checks only when it starts, on an arrival and at its deadline, so no
+// check can come in it; a wait that re-checks on a timer faster than this
+// fails.
+const quietWindow = 500 * time.Millisecond
+
 func TestMountDrive(t *testing.T) {
 	for _, test := range []struct {
 		mountpoint string
@@ -112,6 +118,19 @@ func (d *fakeDrives) expectCheck(t *testing.T, want bool, done <-chan error) {
 	}
 }
 
+// expectNoCheck fails if a check comes, or the wait returns, within
+// quietWindow while nothing arrives and the deadline has not passed.
+func (d *fakeDrives) expectNoCheck(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case got := <-d.checks:
+		t.Fatalf("a check (defined=%v) came without an arrival", got)
+	case err := <-done:
+		t.Fatalf("wait returned %v without an arrival", err)
+	case <-time.After(quietWindow):
+	}
+}
+
 // startWait starts w.wait with a deadline the test fires.
 func startWait(t *testing.T, w *driveWatcher) (deadline chan time.Time, done chan error) {
 	t.Helper()
@@ -149,11 +168,13 @@ func newTestDriveWatcher(t *testing.T, drives *fakeDrives) (*driveWatcher, *byte
 	return w, &notes
 }
 
-func TestDriveWatcherWaitsForTheLetterAndChecksOnlyAfterAnArrival(t *testing.T) {
+func TestDriveWatcherWaitsForTheLetterAndChecksItAgainOnEachArrival(t *testing.T) {
 	drives := newFakeDrives()
 	w, notes := newTestDriveWatcher(t, drives)
 	_, done := startWait(t, w)
 	drives.expectCheck(t, false, done)
+	// Without an arrival the wait does not look again: no timer re-checks.
+	drives.expectNoCheck(t, done)
 	// Another drive arrives: one more check, and P: is still undefined.
 	drives.arrive()
 	drives.expectCheck(t, false, done)
