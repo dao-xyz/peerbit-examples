@@ -40,6 +40,7 @@ import {
     rmSync,
     writeFileSync,
 } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -733,9 +734,13 @@ const main = async () => {
                 env: { PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: "1" },
             });
             overlayDirectories.push(session.overlayDirectory);
-            mkdirSync(path.join(root, "npm-app"));
+            // Asynchronous, so this process keeps reading the session's debug
+            // output meanwhile: on Windows the CLI writes it to a blocking
+            // pipe, and a full one would stall the mount under a synchronous
+            // call made here.
+            await mkdir(path.join(root, "npm-app"));
             for (const [file, bytes] of Object.entries(seedFiles)) {
-                writeFileSync(path.join(root, file), bytes);
+                await writeFile(path.join(root, file), bytes);
             }
             await untilWitnessReads(witness, seedFiles);
             const exit = await stopSession(session);
