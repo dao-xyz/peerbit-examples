@@ -1,5 +1,117 @@
 # @peerbit/shared-fs-cli
 
+## 0.20.0
+
+### Minor Changes
+
+- 1beaab2: `peerbit-fs mount` and its native adapter now end together, so a supervisor
+  such as systemd or launchd only has to watch `mount`:
+    - An adapter that exits on its own after the mount is up (a crash, `kill -9`,
+      the out-of-memory killer) is reported with its exit code or signal and its
+      last 20 stderr lines, and the mount stops as on a first shutdown request:
+      open files are saved and persist-on-exit runs. `mount` then exits 70; a
+      failed step's 1 is kept over 70, and 70 over 75 and 130. Before, `mount`
+      kept running behind a dead mount.
+    - On Linux and macOS that stop first unmounts the disconnected mount the
+      killed adapter left, which failed with `Transport endpoint is not connected`
+      on Linux, but only when the mount table shows a mount that a peerbit-fs
+      adapter of the same user left; otherwise `mount` exits 1 and names the
+      command to run. If both processes were killed, the next adapter at that
+      mountpoint makes the same check and unmounts it before mounting. Mounts are
+      now listed with source `peerbit-shared-fs` (on Linux, type
+      `fuse.peerbit-shared-fs`), so a disconnected mount that an earlier adapter
+      release left is not recognized: unmount it by hand.
+    - An adapter stopped from outside (`peerbit-fs unmount`, `fusermount -u`,
+      `umount`) exits 0, and the mount stops the same way, with exit code 0.
+      `peerbit-fs unmount` no longer leaves its `mount` process running.
+    - An adapter whose `mount` dies, even by `kill -9`, unmounts and exits: it
+      holds a second IPC connection to `mount` and stops when that closes, and on
+      Linux the kernel also sends it SIGHUP when its parent exits (a wrapper
+      script given as `--native-adapter` should start it with `exec`). On Windows,
+      Node already ends the adapter with `mount`, and WinFsp removes the drive.
+    - `mount` exits as soon as its stop is done, about a second sooner than
+      before, and a shutdown request that comes after the stop exits at once with
+      the exit code already set. A stop step that failed (the others still run)
+      is printed as one line before `mount` exits 1, instead of the `mount` help
+      and a stack trace.
+
+    The adapter changes reach users through this CLI version's adapter release
+    (`shared-fs-native-v<version>`). No wire or storage format changes.
+
+- 8c0fe7e: `mount` keeps `node_modules` (the filesystem's sealed names) on this machine,
+  so `npm ci` and `npm install` work in a mount. Before, creating
+  `node_modules` failed with a permission error. The local entries live under
+  the state directory in `shared-fs-local-overlay/<id>`, printed at mount as
+  `Local overlay: <dir>`; they survive remounts and are never sent to other
+  replicas or waited for by `--persist-on-exit`. A mount with `--directory ""`
+  (in-memory state) uses a temporary directory that is removed when the mount
+  stops. Moving a file between `node_modules` and the rest of the mount fails
+  with `EXDEV`, which `mv` and file managers handle by copying, and a shared
+  file or symlink named `node_modules` is no longer shown in a mount (its
+  directory cannot be removed there until the library removes it). The
+  native adapter now reports `EXDEV`, `ENOSPC`, `EPERM` and `EDQUOT` (`ENOSPC`
+  on Windows) instead of `EIO`; this reaches users through this CLI version's
+  adapter release (`shared-fs-native-v<version>`), and an older adapter still
+  reports them as `EIO`. No wire or shared storage format changes.
+- 474dfec: Commands now reach a running mount. `peerbit-fs mount` serves a control
+  endpoint for its state directory, and `status` (also `--json` and
+  `--include-conflicts`), `conflicts` (also `--fail-if-any`, with exit statuses
+  3 and 4), `naming-conflicts`, `resolve-conflict`, `resolve-naming-conflict`,
+  `trust`, `revoke` and `gc`, run for that `--directory`, go through it: the
+  mount runs them on its live filesystem, and they print what they print and
+  exit as they do on the stopped directory. Before, every command failed on the
+  lock Peerbit holds on a mounted state directory. The other commands that open
+  the directory (`create`, `whoami`, `mount`, `benchmark`, `snapshot`,
+  `prepare-disposal`), and a served one whose request the mount cannot take,
+  now print `a mount is running for this directory (pid N); ...` and why, and
+  exit 1. With no mount running, nothing changes.
+
+    Only the mount's user can use the endpoint: on Linux and macOS a socket of
+    mode 0600 in a new directory of mode 0700 (`<directory>/mount-control/`, or
+    `/tmp/pbfs-ctl-*` when that path does not fit a socket address), on Windows a
+    named pipe whose access list admits only the current user. Every request also
+    carries a random token from `<directory>/mount-control.json` (mode 0600 on
+    Linux and macOS), compared in constant time; that file names its state
+    directory by device and inode, so a copy of it elsewhere names no mount.
+    `mount` removes both when it exits, also after its adapter died, a failed
+    start, or a shutdown signal while it starts (exit 130 once it holds its state
+    directory); the next `mount` replaces what a killed one left.
+    A request is one line of JSON of at most 1 MiB, due within 30 s of
+    connecting, with a protocol version, and the mount refuses another
+    peerbit-fs version. A stopping mount refuses new requests and waits up to
+    10 s for a change a command has begun, also once Ctrl-C ended the command,
+    so that the change is done before Peerbit stops and persist-on-exit waits
+    for the filesystem entries it wrote. No storage format changes.
+
+### Patch Changes
+
+- 1925233: One-shot commands such as `whoami`, `create`, `trust` and `conflicts` now
+  exit once their work and their peer's stop are done, whatever a dependency
+  leaves armed. Before, such a command could print its result and then not
+  exit: a libp2p circuit-relay reservation answered while the peer stopped
+  could leave its refresh timer armed for almost two hours. Now a process
+  that something still keeps alive 2 seconds after the stop exits then, once
+  stdout and stderr have written everything, with the exit code the command
+  set. A process that nothing keeps alive exits as soon as before. `mount` is
+  unchanged: it already exits once its stop and persist-on-exit are done.
+- 8c0fe7e: On Windows, `mount` could print `Mounted` before its drive letter existed, so
+  a command started on that line, such as `mkdir P:\app`, failed with `ENOENT`.
+  WinFsp calls the native adapter's init before it defines the letter, and the
+  adapter reported ready from init. It now reports ready once the letter is
+  defined: it hears the arrival Windows broadcasts for the letter and checks it
+  with `QueryDosDeviceW`, and it stops waiting after 10 s. If the letter is
+  still not defined then, or the adapter cannot otherwise confirm a mount, it
+  says so and never reports ready, so `mount` fails at its readiness limit
+  instead of printing `Mounted`. A directory mountpoint on Windows is not
+  waited for: just after `Mounted` it can be missing, and accesses through it
+  can fail with `ECANCELED` until WinFsp serves it, so scripts should mount at a
+  drive letter. The fix reaches users through this CLI version's adapter release
+  (`shared-fs-native-v<version>`). The README's Windows example now mounts at a
+  drive letter: it created the mount directory first, which WinFsp refuses.
+- Updated dependencies [8c0fe7e]
+- Updated dependencies [1beaab2]
+    - @peerbit/shared-fs@0.20.0
+
 ## 0.19.0
 
 ### Minor Changes
