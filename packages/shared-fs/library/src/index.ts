@@ -177,6 +177,12 @@ export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
 export {
+    localOverlayDirectory,
+    openMountLocalOverlay,
+    type SharedFsLocalOverlayOptions,
+    type SharedFsMountLocalOverlay,
+} from "./mount-local-overlay.js";
+export {
     SHARED_FS_MOUNT_PROFILE_SCHEMA,
     SHARED_FS_MOUNT_PROFILE_SCHEMA_VERSION,
     createSharedFsMountProfileWriter,
@@ -19868,11 +19874,11 @@ export class SharedFsHandle {
 
 export const openSharedFs = async (options: OpenSharedFsOptions) => {
     if (options.ignore?.onIgnoredWrite === "divert") {
-        // Refused BEFORE anything opens: the machine-local overlay is a
-        // staged follow-up.
+        // Refused BEFORE anything opens. Mounts keep ignored paths local
+        // through createSharedFsMountBackend's localOverlay instead.
         throw new SharedFsError(
             "EINVAL",
-            'ignore.onIgnoredWrite "divert" (the machine-local overlay) is not available yet; use "reject"'
+            'ignore.onIgnoredWrite "divert" is not available; use "reject" (a mount keeps ignored paths local with its localOverlay option)'
         );
     }
     if (options.ignore?.patterns) {

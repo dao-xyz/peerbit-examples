@@ -38,6 +38,11 @@ import {
     type MountControlPrint,
 } from "./mount-control.js";
 import {
+    localOverlayLines,
+    openMountLocalOverlayForCli,
+    type MountLocalOverlay,
+} from "./local-overlay.js";
+import {
     describeNativeAdapterInstall,
     installNativeAdapter,
     nativeAdapterReleaseTag,
@@ -491,6 +496,8 @@ export const stopMountSession = async (
         ipc?: { close(): Promise<void> };
         /** Drained (open files commit), then detached from the namespace feed. */
         backend?: Pick<SharedFsMountBackend, "dispose" | "drain">;
+        /** After the backend: a temporary overlay is deleted. */
+        localOverlay?: Pick<MountLocalOverlay, "remove">;
         profileWriter?: SharedFsMountProfileWriter;
         /** persist-on-exit: after the drain, before Peerbit stops. */
         persist?(): Promise<void>;
@@ -519,6 +526,7 @@ export const stopMountSession = async (
         process.exitCode = 1;
     }
     await step(() => session.backend?.dispose?.());
+    await step(() => session.localOverlay?.remove());
     await step(() => closeMountProfile(session.profileWriter));
     await step(() => session.persist?.());
     await step(() => session.control?.close());
@@ -2629,6 +2637,7 @@ export const createCliParser = (args: string[]) => {
                     | ReturnType<typeof createSharedFsMountBackend>
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
+                let localOverlay: MountLocalOverlay | undefined;
                 let fsHandle!: Awaited<ReturnType<typeof openCliFs>>;
                 // Settles, reported, if the adapter exits on its own.
                 let adapterExited: Promise<void> | undefined;
@@ -2638,6 +2647,7 @@ export const createCliParser = (args: string[]) => {
                     mounted,
                     ipc,
                     backend,
+                    localOverlay,
                     profileWriter,
                     stopPeerbit: () => stopPeerbitForCli(peerbit),
                 });
@@ -2709,8 +2719,24 @@ export const createCliParser = (args: string[]) => {
                         );
                     }
                     const profile = profileWriter?.sink;
+                    // node_modules (the sealed names) stays on this machine.
+                    localOverlay = await openMountLocalOverlayForCli(
+                        await loadSharedFsRuntime(),
+                        {
+                            stateDirectory: directory,
+                            address: fsHandle.address,
+                            sealedNames: fsHandle.program.sealedIgnoredNames,
+                        }
+                    );
+                    for (const line of await localOverlayLines(
+                        localOverlay,
+                        fsHandle
+                    )) {
+                        console.log(line);
+                    }
                     backend = createSharedFsMountBackend(fsHandle, {
                         profile,
+                        localOverlay: localOverlay.overlay,
                     });
                     const mountpoint = normalizeNativeMountpoint(
                         String(argv.mountpoint)

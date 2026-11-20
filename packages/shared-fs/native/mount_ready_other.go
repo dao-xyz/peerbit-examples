@@ -1,9 +1,9 @@
-//go:build native_mount && !darwin
+//go:build native_mount && !darwin && !windows
 
 package main
 
-// mountWatcher is a no-op outside macOS: Linux FUSE and WinFsp call Init only
-// once the mount is attached.
+// mountWatcher is a no-op on Linux: libfuse calls Init only once the kernel
+// has attached the mount. macOS and Windows have their own.
 type mountWatcher struct{}
 
 func newMountWatcher(mountpoint string) (*mountWatcher, error) {

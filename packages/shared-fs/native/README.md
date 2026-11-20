@@ -63,6 +63,23 @@ adapter's environment, which only the same user can read, never in its
 arguments, which other local users can list; the adapter unsets it, so no
 process it starts inherits it.
 
+The adapter writes `peerbit-shared-fs-native ready` to stdout once the mount
+is attached, and `peerbit-fs mount` prints `Mounted` only after that line.
+When the adapter cannot confirm the mount, it prints why and writes no ready
+line, so `peerbit-fs mount` fails at its 15 s readiness limit instead.
+Linux FUSE and macFUSE call the filesystem's init once the kernel has attached
+the mount, but WinFsp calls it before it creates the volume and defines the
+drive letter. So on Windows the adapter waits for the letter: before it mounts
+it opens a hidden window for the `WM_DEVICECHANGE` arrival that
+`DefineDosDevice` broadcasts, and it checks the letter with `QueryDosDeviceW`
+when the wait starts and after each arrival. It stops waiting after 10 s: if
+the letter is defined by then, it prints that no arrival reached it and
+reports ready; if not, it could not confirm the mount. A directory mountpoint
+on Windows is not waited for. WinFsp creates the directory after init and
+serves it only once its dispatcher runs, so just after `Mounted` the directory
+can be missing and accesses through it can fail with `ECANCELED`; mount at a
+drive letter when something acts on `Mounted`.
+
 The endpoint is provided by the TypeScript Peerbit daemon: on Linux a Unix
 socket in a new owner-only directory, which other local users cannot reach and
 which skips the TCP stack; on macOS and Windows TCP loopback (macOS Unix
@@ -427,6 +444,11 @@ mtime on every file version. The adapter maps the POSIX calls onto them:
   regular file finds an exec bit, so `test -x` agrees with `execve`. It does
   not check read or write masks. Modes and owners are not an authorization
   boundary; use Shared FS trusted-writer authorization for write access.
+- Paths the mount keeps on this machine (everything at or below a
+  `node_modules` directory; see the CLI README, "Install dependencies in a
+  mount") are ordinary host files: `chmod` keeps every permission bit, the
+  create mode applies with the umask, `utimens` sets the time of any entry,
+  a symlink's own included, and directories report the host's times.
 
 Per platform:
 
@@ -479,6 +501,31 @@ Per platform:
 On Linux and macOS, inode numbers are libfuse node ids that change after the
 kernel forgets an inode; git's default `core.checkStat` compares them, so
 `git status` can re-hash such files (correct, but slower).
+
+## Error codes
+
+A failed call returns the errno of the error name the daemon sent (`ENOENT`,
+`EEXIST`, `EACCES` and so on); a name the adapter does not know becomes `EIO`,
+and so does a failure with no name. These names reach callers too:
+
+| Name     | When                                                                                                                | Linux | macOS | Windows: errno -> WinFsp NTSTATUS -> Win32 -> Node                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------- | ----- | ----- | ------------------------------------------------------------------ |
+| `EXDEV`  | a rename the mount cannot make in place: between `node_modules` and the rest of the mount, or across an ignore rule | 18    | 18    | 18 -> `STATUS_NOT_SAME_DEVICE` -> `ERROR_NOT_SAME_DEVICE` -> EXDEV |
+| `ENOSPC` | the disk under the daemon's store or under `node_modules` is full                                                   | 28    | 28    | 28 -> `STATUS_DISK_FULL` -> `ERROR_DISK_FULL` -> ENOSPC            |
+| `EPERM`  | the host refused the operation                                                                                      | 1     | 1     | 1 -> `STATUS_ACCESS_DENIED` -> `ERROR_ACCESS_DENIED` -> EPERM      |
+| `EDQUOT` | a disk quota there is exhausted                                                                                     | 122   | 69    | sent as ENOSPC (Windows has no quota errno): 28 -> ENOSPC          |
+
+`mv`, file managers and most copy tools handle `EXDEV` by copying and
+deleting. On Windows `EACCES` also becomes `STATUS_ACCESS_DENIED`, so Node
+reports `EPERM` for both. An adapter built before these names existed reports
+them as `EIO`.
+
+The daemon tells a full disk or an exhausted quota under its store from the
+store's own error, which on Windows is worded in the system's language: there
+it is recognised in English only, and in another language the failure stays
+`EIO` (the adapter then prints the store's message). Once its disk has filled,
+the store refuses every write until the mount restarts, even after space is
+freed: free space, then stop the mount and mount again.
 
 ## Kernel caching and other peers' changes
 

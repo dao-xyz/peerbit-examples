@@ -14,7 +14,9 @@ on:
             - "scripts/install-winfsp.ps1"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
+            - "scripts/shared-fs-local-overlay-npm-smoke.mjs"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
+            - "scripts/shared-fs-npm-fixture*.mjs"
     push:
         branches: [master]
         paths:
@@ -25,7 +27,9 @@ on:
             - "scripts/install-winfsp.ps1"
             - "scripts/shared-fs-external-native-smoke.ps1"
             - "scripts/shared-fs-external-native-smoke.sh"
+            - "scripts/shared-fs-local-overlay-npm-smoke.mjs"
             - "scripts/shared-fs-native-mount-benchmark*.mjs"
+            - "scripts/shared-fs-npm-fixture*.mjs"
     workflow_dispatch:
         inputs:
             mounted_benchmark:
@@ -65,7 +69,7 @@ jobs:
         runs-on: ${{ matrix.os }}
         # Four extra mounted benchmark passes need more time than the smoke,
         # and the developer workload adds a git clone/status set to each pass.
-        timeout-minutes: ${{ inputs.mount_profile && (inputs.dev_workload && 180 || 120) || (inputs.dev_workload && 60 || 30) }}
+        timeout-minutes: ${{ inputs.mount_profile && (inputs.dev_workload && 180 || 120) || (inputs.dev_workload && 60 || 45) }}
         strategy:
             fail-fast: false
             matrix:
@@ -137,6 +141,32 @@ jobs:
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_OVERWRITE_BASE_BYTES: ${{ inputs.overwrite_base_bytes }}
                   PEERBIT_SHARED_FS_NATIVE_MOUNT_BENCH_DEV_WORKLOAD: ${{ inputs.dev_workload && '1' || '' }}
               run: scripts/shared-fs-external-native-smoke.sh
+
+            - name: Install an npm project through the mount's local overlay
+              timeout-minutes: 25
+              shell: bash
+              run: node scripts/shared-fs-local-overlay-npm-smoke.mjs
+
+            - name: Print npm overlay smoke logs
+              if: failure()
+              shell: bash
+              run: |
+                  # The smoke prints a failure's details itself; this also
+                  # covers a smoke the step timeout stopped.
+                  for log in "$RUNNER_TEMP"/shared-fs-npm-smoke/driver.log "$RUNNER_TEMP"/shared-fs-npm-smoke/session-*.log; do
+                    [ -f "$log" ] || continue
+                    echo "::group::$(basename "$log"), last 200 lines"
+                    tail -n 200 "$log"
+                    echo "::endgroup::"
+                  done
+
+            - name: Upload npm overlay smoke evidence
+              if: failure()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: shared-fs-npm-overlay-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: ${{ runner.temp }}/shared-fs-npm-smoke
+                  if-no-files-found: ignore
 
             - name: Add filesystem benchmark summaries
               if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}
@@ -273,7 +303,7 @@ jobs:
     windows-winfsp:
         name: Windows WinFsp native smoke (${{ matrix.os }})
         runs-on: ${{ matrix.os }}
-        timeout-minutes: ${{ inputs.dev_workload && 120 || (inputs.mounted_benchmark && 60 || 30) }}
+        timeout-minutes: ${{ inputs.dev_workload && 120 || (inputs.mounted_benchmark && 60 || 45) }}
         strategy:
             fail-fast: false
             matrix:
@@ -347,6 +377,34 @@ jobs:
                   # Adapter debug output is printed only when the smoke fails.
                   PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: ${{ (inputs.mounted_benchmark || inputs.dev_workload) && '0' || '1' }}
               run: scripts/shared-fs-external-native-smoke.ps1
+
+            - name: Install an npm project through the mount's local overlay
+              timeout-minutes: 25
+              run: node scripts/shared-fs-local-overlay-npm-smoke.mjs
+
+            - name: Print npm overlay smoke logs
+              if: failure()
+              run: |
+                  # The smoke prints a failure's details itself; this also
+                  # covers a smoke the step timeout stopped.
+                  $Evidence = Join-Path $env:RUNNER_TEMP "shared-fs-npm-smoke"
+                  if (Test-Path $Evidence) {
+                    Get-ChildItem $Evidence -Filter *.log |
+                      Where-Object { $_.Name -eq "driver.log" -or $_.Name -like "session-*" } |
+                      ForEach-Object {
+                        Write-Output "::group::$($_.Name), last 200 lines"
+                        Get-Content $_.FullName -Tail 200
+                        Write-Output "::endgroup::"
+                      }
+                  }
+
+            - name: Upload npm overlay smoke evidence
+              if: failure()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: shared-fs-npm-overlay-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: ${{ runner.temp }}/shared-fs-npm-smoke
+                  if-no-files-found: ignore
 
             - name: Add filesystem benchmark summaries
               if: ${{ always() && (inputs.mounted_benchmark || inputs.dev_workload) }}

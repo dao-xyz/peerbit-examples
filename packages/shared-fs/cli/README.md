@@ -248,6 +248,8 @@ Native runtime prerequisites are platform-specific:
 
 Mounts keep each file's exec bit and mtime and support symlinks: `chmod`
 keeps only the exec bit, `touch` sets mtime, and `ln -s` creates a link.
+Everything at or below a directory named `node_modules` keeps every
+permission bit (see "Install dependencies in a mount").
 `chown` succeeds without storing an owner; files report the mounting user.
 Windows never sets the exec bit. It creates file and directory symlinks
 (`mklink`, `mklink /D`, `New-Item -ItemType SymbolicLink`) with a relative
@@ -312,13 +314,17 @@ each sub-phase's share of the target write. Kernel scheduling and cache time,
 remote readability, replication, and persisted acknowledgements are not
 reported.
 
-On Windows PowerShell:
+On Windows PowerShell, mount at a free drive letter, or at a directory that
+does not exist yet (WinFsp creates it, and refuses one that exists). `Mounted`
+is printed once a drive letter exists. A directory is not waited for: just
+after `Mounted` it can still be missing or not yet lead to the mount, and
+accesses through it can fail with `ECANCELED` until WinFsp serves it, so a
+script that acts on `Mounted` should mount at a drive letter.
 
 ```powershell
 peerbit-fs status
 $address = peerbit-fs create
-New-Item -ItemType Directory -Force "$env:USERPROFILE\PeerbitShared"
-peerbit-fs mount $address "$env:USERPROFILE\PeerbitShared"
+peerbit-fs mount $address P:
 ```
 
 Authentication is on by default. Use `peerbit-fs create --no-auth` only for
@@ -568,6 +574,48 @@ dialled or no `--bootstrap` node answers. The options apply to `mount`,
 `prepare-disposal` and `benchmark`; `status` and `benchmark` without an
 address connect to nothing. `--no-replicate` reads that skip the public network
 still dial `--peer` and `--bootstrap`.
+
+## Install dependencies in a mount
+
+`npm ci`, `npm install` and other tools that write `node_modules` work in a
+mount: `node_modules` (the filesystem's sealed name) stays on this machine,
+in `shared-fs-local-overlay/<id>` under the state directory (`--directory`),
+which `mount` prints:
+
+```text
+Local overlay: /home/me/peerbit-shared-fs/shared-fs-local-overlay/<id>
+```
+
+Everything at or below a directory named `node_modules`, at any depth, is an
+ordinary local file, directory or symlink: `chmod` keeps every permission
+bit, `mkdir` takes the default mode and `touch` sets the mtime. It is never
+sent to other replicas, never waited for by persist-on-exit, and kept across
+remounts; other machines install their own.
+To discard it, stop the mount and delete that directory. A mount with
+`--directory ""` (in-memory state) keeps it in a temporary directory that is
+deleted when the mount stops.
+
+- Moving a file or directory between `node_modules` and the rest of the
+  mount fails with `EXDEV`, which `mv` and file managers handle by copying:
+  `mv node_modules node_modules.bak` copies the tree into the shared
+  filesystem and publishes it.
+- A directory holding this machine's `node_modules` cannot be removed or
+  renamed over (`ENOTEMPTY`) until `node_modules` is gone; `rm -r` removes
+  it first.
+- Another machine's file or symlink named `node_modules` is not shown in a
+  mount; `peerbit-fs` commands and the library still read it. It still
+  keeps its directory from being removed: `rmdir` and `rm -r` fail with
+  `ENOTEMPTY` though the directory looks empty. No mount shows it, so remove
+  it with the library (`rm()`), or rename the directory, which takes it
+  along.
+- When another machine deletes a directory holding a `node_modules`, the
+  local entries stay on disk, hidden, and `mount` says how many such
+  directories it found:
+  `Local overlay: 2 directories with local entries were removed from the filesystem; their entries stay under <dir> until you delete them`.
+- On Windows, pnpm's directory junctions are not supported (WinFsp cannot
+  create them), symlinks in `node_modules` need the symlink privilege
+  (Developer Mode or an elevated account), and deep trees pass 260
+  characters: delete the directory with a tool that supports long paths.
 
 ## Stop a mount: persist-on-exit
 

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,8 @@ import {
     FileVersion,
     Peerbit,
     createSharedFsMountBackend,
+    localOverlayDirectory,
+    openMountLocalOverlay,
     openSharedFs,
     type SharedFsHandle,
     type SharedFsMountBackend,
@@ -27,6 +30,7 @@ import {
     waitForTermination,
     type MountShutdown,
 } from "../index.js";
+import { openMountLocalOverlayForCli } from "../local-overlay.js";
 
 /**
  * mount --persist-on-exit, through the mount's shutdown seams:
@@ -1367,6 +1371,122 @@ describe("mount --persist-on-exit over real TCP", () => {
             ),
         ]);
         expect(performance.now() - requested).toBeLessThan(FENCE_MS);
+    });
+
+    it("prints nothing when every write stayed in node_modules, and deletes an in-memory mount's overlay", async () => {
+        const writer = await createPeer("writer", true);
+        const receiver = await createPeer("receiver");
+        await writer.peer.dial(receiver.peer.getMultiaddrs());
+        const writerFs = await open(writer.peer, "writer");
+        await open(receiver.peer, "receiver", writerFs.address);
+        await untilReplicaSeen(writerFs);
+
+        // As `mount --directory ""` opens it: a temporary directory.
+        const localOverlay = await openMountLocalOverlayForCli(
+            { localOverlayDirectory, openMountLocalOverlay },
+            {
+                stateDirectory: undefined,
+                address: writerFs.address,
+                sealedNames: writerFs.program.sealedIgnoredNames,
+            }
+        );
+        directories.push(localOverlay.directory);
+        const backend = createSharedFsMountBackend(writerFs, {
+            localOverlay: localOverlay.overlay,
+        });
+        await backend.mkdir("/node_modules");
+        // The last file stays open: the drain closes it, unreported.
+        await writeThroughMount(backend, 20, {
+            prefix: "/node_modules/f",
+            leaveLastOpen: true,
+        });
+        expect(writerFs.pendingLocalWrites()).toEqual({
+            entries: 0,
+            remoteReplicaSeen: true,
+        });
+        const fence = vi.spyOn(writerFs, "persistLocalWrites");
+        const host = fakeHost();
+        const stopped = waitForTermination(
+            (shutdown) =>
+                stopMountSession({
+                    backend,
+                    localOverlay,
+                    persist: () =>
+                        persistOnExit(
+                            writerFs,
+                            { persistOnExit: true, persistTimeoutMs: FENCE_MS },
+                            shutdown
+                        ),
+                    stopPeerbit: () => stop(writer.peer),
+                }),
+            host as any,
+            new PassThrough()
+        );
+        host.emit("SIGTERM");
+        await within(stopped, "the writer stops", FENCE_MS + STEP_MS);
+
+        expect(fence).not.toHaveBeenCalled();
+        expect(persistLines(stderr())).toEqual([]);
+        expect(process.exitCode ?? 0).toBe(0);
+        await expect(fs.stat(localOverlay.directory)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
+    it("deletes an in-memory mount's overlay when the mount fails after opening it", async () => {
+        const writer = await createPeer("writer", true);
+        const writerFs = await open(writer.peer, "writer");
+        const base = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-persist-failed-mount-")
+        );
+        directories.push(base);
+        // Each overlay the mount printed, and whether it was there then.
+        const printed: Array<{ directory: string; existed: boolean }> = [];
+        vi.spyOn(console, "log").mockImplementation((...args) => {
+            const line = args.join(" ");
+            if (!line.startsWith("Local overlay: ")) return;
+            const directory = line.slice("Local overlay: ".length);
+            directories.push(directory);
+            printed.push({ directory, existed: existsSync(directory) });
+        });
+
+        // `mount --directory ""` through the CLI, writable at once as this
+        // block's joins are. Its adapter cannot start, so the mount fails
+        // after it opened the overlay, and the failed start stops what it
+        // set up.
+        const adapter = path.join(base, "adapter-never-started");
+        const failure = await within(
+            runCli([
+                "mount",
+                writerFs.address,
+                path.join(base, "not-mounted"),
+                "--directory",
+                "",
+                "--peer",
+                writer.peer.getMultiaddrs()[0].toString(),
+                "--native-adapter",
+                adapter,
+                "--allow-partial-writes",
+            ]).then(
+                () => undefined,
+                (error: unknown) => error
+            ),
+            "the mount fails at its adapter"
+        );
+
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain(adapter);
+        expect(printed).toEqual([
+            { directory: expect.any(String), existed: true },
+        ]);
+        const [{ directory }] = printed;
+        expect(path.dirname(directory)).toBe(path.resolve(os.tmpdir()));
+        expect(path.basename(directory)).toMatch(
+            /^peerbit-shared-fs-local-overlay-/
+        );
+        await expect(fs.stat(directory)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
     });
 });
 

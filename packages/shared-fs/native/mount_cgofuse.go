@@ -21,7 +21,7 @@ type peerbitFS struct {
 	debug   bool
 	profile *mountProfiler
 	ready   sync.Once
-	mounted *mountWatcher
+	mounted attachWaiter
 	stop    *mountStop
 	unmount func()
 }
@@ -188,12 +188,7 @@ func (fs *peerbitFS) Init() {
 		fs.stop.mounted(fs.unmount)
 		// Report ready only once the mount is attached (see mountWatcher),
 		// off the callback thread so that Init returns first.
-		go func() {
-			if err := fs.mounted.wait(); err != nil {
-				fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native could not confirm the mount is attached: %v\n", err)
-			}
-			fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")
-		}()
+		go reportReady(fs.mounted, os.Stdout, os.Stderr)
 	})
 }
 
@@ -805,6 +800,17 @@ func errno(err error) int {
 			return -fuse.ENAMETOOLONG
 		case "EFBIG":
 			return -fuse.EFBIG
+		case "EXDEV":
+			return -fuse.EXDEV
+		case "ENOSPC":
+			return -fuse.ENOSPC
+		case "EPERM":
+			return -fuse.EPERM
+		case "EDQUOT":
+			if code := edquotErrno(runtime.GOOS); code != 0 {
+				return -code
+			}
+			return -fuse.ENOSPC
 		}
 	}
 	fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %v\n", err)
@@ -816,6 +822,9 @@ func errno(err error) int {
 func errnoName(result int) string {
 	if runtime.GOOS == "linux" && -result == linuxESTALE {
 		return "ESTALE"
+	}
+	if code := edquotErrno(runtime.GOOS); code != 0 && -result == code {
+		return "EDQUOT"
 	}
 	switch -result {
 	case fuse.ENOENT:
@@ -844,6 +853,12 @@ func errnoName(result int) string {
 		return "ENAMETOOLONG"
 	case fuse.EFBIG:
 		return "EFBIG"
+	case fuse.EXDEV:
+		return "EXDEV"
+	case fuse.ENOSPC:
+		return "ENOSPC"
+	case fuse.EPERM:
+		return "EPERM"
 	case fuse.ENOSYS:
 		return "ENOSYS"
 	}

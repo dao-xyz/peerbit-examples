@@ -26,7 +26,8 @@ const packages = [
         // The readiness modules ship as both src and lib.
         // M2 warm freshness: 4.10 MB. N4 mount conflict tree: 4.24 MB.
         // Persist-on-exit: 4.26 MB.
-        maxUnpackedBytes: 4_300_000,
+        // Local overlay: 4.37 MB.
+        maxUnpackedBytes: 4_400_000,
         requiredPaths: [
             "LICENSE",
             "README.md",
@@ -45,7 +46,8 @@ const packages = [
         // about 365 KB. Adapter supervision: about 387 KB.
         // Commands through a running mount's control endpoint: about 463 KB.
         // Exiting one-shot commands once their stop is done: about 466 KB.
-        maxUnpackedBytes: 470_000,
+        // Local overlay: about 477 KB.
+        maxUnpackedBytes: 480_000,
         requiredPaths: [
             "LICENSE",
             "README.md",
