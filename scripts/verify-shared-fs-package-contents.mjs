@@ -44,7 +44,8 @@ const packages = [
         // Persist-on-exit: about 356 KB. Refusing valued boolean flags:
         // about 365 KB. Adapter supervision: about 387 KB.
         // Commands through a running mount's control endpoint: about 463 KB.
-        maxUnpackedBytes: 465_000,
+        // Exiting one-shot commands once their stop is done: about 466 KB.
+        maxUnpackedBytes: 470_000,
         requiredPaths: [
             "LICENSE",
             "README.md",

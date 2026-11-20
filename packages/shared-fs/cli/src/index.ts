@@ -638,6 +638,29 @@ export const exitOnceFlushed = (
 };
 
 /**
+ * How long a command that has finished, its stop included, waits for the
+ * event loop to empty before it exits anyway. The timers Peerbit's stop
+ * leaves end within about a second. A libp2p relay reservation answered
+ * while the peer stops can leave its refresh timer armed for about two
+ * hours.
+ */
+export const EXIT_GRACE_MS = 2_000;
+
+/**
+ * Ends the process once its command has finished, its stop included. A
+ * process that nothing keeps alive exits on its own, as before: this timer
+ * does not keep it alive. One that a dependency keeps alive exits after
+ * `graceMs`, as exitOnceFlushed does: with the exit code set, once stdout
+ * and stderr have written what they hold. A mount's command finishes only
+ * after its stop and persist-on-exit.
+ */
+export const exitWhenDone = (
+    host: Pick<NodeJS.Process, "exit"> = process,
+    streams?: NodeJS.WritableStream[],
+    graceMs = EXIT_GRACE_MS
+) => setTimeout(() => exitOnceFlushed(host, streams), graceMs).unref();
+
+/**
  * Exits once the mount's stop has settled, as exitOnceFlushed does. A stop
  * that failed ran every step, then threw the first failure: that error is
  * printed as one line, with exit code 1. Thrown on, it reached yargs, which
