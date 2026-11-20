@@ -22,6 +22,8 @@ type peerbitFS struct {
 	profile *mountProfiler
 	ready   sync.Once
 	mounted *mountWatcher
+	stop    *mountStop
+	unmount func()
 }
 
 // requestReaddirStats enables readdir-plus and per-entry listing stats only on
@@ -49,6 +51,7 @@ func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mou
 		client:  newIPCClient(endpoint, ipcClientOptions{token: token, profile: profile}),
 		debug:   debug,
 		profile: profile,
+		stop:    &mountStop{},
 	}
 	defer fs.client.close()
 	fs.debugf("starting mount endpoint=%s mountpoint=%s", endpoint, mountpoint)
@@ -57,10 +60,20 @@ func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mou
 	if err := fs.client.negotiate(); err != nil {
 		return fmt.Errorf("native adapter could not connect to %s: %w", endpoint, err)
 	}
+	// The lifeline ends when peerbit-fs closes its IPC server or exits,
+	// however it exits; the mount then ends too (superviseMount).
+	lifeline, err := openIPCLifeline(endpoint, token)
+	if err != nil {
+		return fmt.Errorf("native adapter could not connect to %s: %w", endpoint, err)
+	}
+	defer lifeline.close()
 	if debug {
 		if err := fs.preflight(); err != nil {
 			return err
 		}
+	}
+	if err := clearAndReportDeadMount(mountpoint, hostDeadMountSystem(), os.Stderr); err != nil {
+		return err
 	}
 	mounted, err := newMountWatcher(mountpoint)
 	if err != nil {
@@ -70,12 +83,24 @@ func runNativeMount(endpoint, mountpoint, token string, debug bool, profile *mou
 	host := fuse.NewFileSystemHost(fs)
 	host.SetCapOpenTrunc(true)
 	host.SetCapReaddirPlus(requestReaddirStats)
+	fs.unmount = func() {
+		if host.Unmount() {
+			return
+		}
+		if err := fallbackUnmount(mountpoint); err != nil {
+			fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: could not unmount %s: %v\n", mountpoint, err)
+		}
+	}
+	hangups := make(chan os.Signal, 1)
+	notifyHangup(hangups)
+	go superviseMount(fs.stop, hangups, lifeline.ended())
 	options := nativeMountOptions(runtime.GOOS, debug)
 	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
 	}
-	return nil
+	// nil once unmounted on a signal or from outside.
+	return fs.stop.err()
 }
 
 // beginCallback returns nil when profiling is off, so the disabled path adds
@@ -159,6 +184,8 @@ func (fs *peerbitFS) Init() {
 	fs.profile.holdShutdownSignals()
 	fs.debugf("fuse init")
 	fs.ready.Do(func() {
+		// From here a stop unmounts; one requested earlier unmounts now.
+		fs.stop.mounted(fs.unmount)
 		// Report ready only once the mount is attached (see mountWatcher),
 		// off the callback thread so that Init returns first.
 		go func() {

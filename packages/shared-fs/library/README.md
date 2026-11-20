@@ -1933,10 +1933,10 @@ peerbit-fs prepare-disposal "$ADDRESS" --min-acks 1
 # Only after both commands exit successfully, dispose of the machine or its state.
 ```
 
-`peerbit-fs unmount "$MOUNTPOINT"` only detaches the OS mountpoint; it does not
-stop a separately running `peerbit-fs mount` process. If manual unmounting is
-needed, still terminate that original process and wait for it to exit before
-running the barrier against the same Peerbit state directory.
+`peerbit-fs unmount "$MOUNTPOINT"` (Linux and macOS) detaches the OS
+mountpoint, and the `peerbit-fs mount` process serving it then stops as on
+Ctrl-C. Wait for that process to exit before running the barrier against the
+same Peerbit state directory.
 
 `--min-acks` defaults to `1`; `--timeout-ms <number>` sets an overall deadline
 for the barrier after the filesystem has opened, and `--json` emits a

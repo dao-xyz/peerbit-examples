@@ -53,7 +53,9 @@ func pathExists(path string) bool {
 
 // nativeMountOptions returns the cgofuse mount arguments before the
 // mountpoint. macFUSE (through FUSE 2.8) keeps libfuse's defaults: names and
-// attributes cached for 1 s, missing names never.
+// attributes cached for 1 s, missing names never. On Linux and macOS the
+// mount table names the mount after nativeFSName, by which a mount left
+// disconnected is recognised (clearDeadMount).
 func nativeMountOptions(goos string, debug bool) []string {
 	options := []string{"-s"}
 	switch goos {
@@ -64,7 +66,9 @@ func nativeMountOptions(goos string, debug bool) []string {
 		// which CreateFileW requests for normal CREATE_ALWAYS/open("w") calls.
 		options = append(options, "-o", "uid=-1,gid=-1")
 	case "linux":
-		options = append(options, "-o", linuxKernelCacheOptions)
+		options = append(options, "-o", linuxKernelCacheOptions, "-o", "fsname="+nativeFSName+",subtype="+nativeFSName)
+	case "darwin":
+		options = append(options, "-o", "fsname="+nativeFSName)
 	}
 	if debug {
 		options = append(options, "-d")

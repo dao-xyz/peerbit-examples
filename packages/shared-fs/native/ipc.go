@@ -395,7 +395,9 @@ func readBoundedJSONLine(reader *bufio.Reader, maxBytes int) ([]byte, error) {
 	}
 }
 
-func dialEndpoint(endpoint string) (net.Conn, error) {
+// dialIPC connects to an endpoint: a Unix socket path, unix://path, or
+// tcp://host:port.
+func dialIPC(endpoint string) (net.Conn, error) {
 	network, address := "unix", endpoint
 	if strings.HasPrefix(endpoint, "tcp://") || strings.HasPrefix(endpoint, "unix://") {
 		parsed, err := url.Parse(endpoint)
@@ -404,7 +406,11 @@ func dialEndpoint(endpoint string) (net.Conn, error) {
 		}
 		network, address = parsed.Scheme, parsed.Host+parsed.Path
 	}
-	conn, err := net.Dial(network, address)
+	return net.Dial(network, address)
+}
+
+func dialEndpoint(endpoint string) (net.Conn, error) {
+	conn, err := dialIPC(endpoint)
 	if err != nil {
 		return nil, err
 	}

@@ -71,7 +71,8 @@ adapter reads and writes with blocking system calls (except on Windows), so a
 response wakes the FUSE callback's own thread instead of a Go poller thread
 that must hand the wakeup over; that cut a getattr round trip by a fifth on
 macOS. The adapter keeps one serialized connection open for the mount
-session, matching cgofuse's current single-threaded mode. A transport failure
+session, matching cgofuse's current single-threaded mode, and a second one
+that carries no requests (see Mount lifecycle). A transport failure
 fails the current filesystem operation and discards that connection; the next
 explicit operation reconnects. Requests are never replayed automatically
 because a lost response does not prove that a mutation was not applied.
@@ -311,6 +312,56 @@ profiling off the only added work is a nil check.
 
 Kernel time before callback entry, cached operations that never enter
 userspace, and time after callback return are not observable here.
+
+## Mount lifecycle
+
+`peerbit-fs mount` starts the adapter, stops it with SIGINT (on Windows it
+terminates it), and ends the mount on any other exit after readiness: exit
+status 70, or 0 when the adapter exited 0 because it was unmounted from
+outside. The adapter, in turn, ends its mount when `peerbit-fs mount` is gone,
+however that process ended:
+
+- Every adapter opens a second IPC connection, negotiated like the first,
+  that carries no requests. The operating system closes the sockets of a
+  process that exits or is killed, so when that connection ends the adapter
+  unmounts, prints why, and exits with status 1. Nothing polls: the adapter
+  blocks reading it.
+- `peerbit-fs mount` passes its process id in `PEERBIT_SHARED_FS_PARENT_PID`.
+  On Linux the adapter asks the kernel for SIGHUP when its parent exits
+  (`PR_SET_PDEATHSIG`) and then checks that its parent is that process.
+  Another parent, a wrapper that did not `exec` the adapter (a shell script,
+  `sudo`, `strace -f`) or a `peerbit-fs` that exited before the request, gets
+  a one-line note on stderr and no refusal: the signal then watches that
+  parent, and the IPC connections still end the mount (they fail at once when
+  `peerbit-fs` is gone). Without the variable (an adapter started by hand) it
+  skips this.
+- SIGHUP, from that request or a closed terminal, unmounts and exits with
+  status 0, as SIGINT and SIGTERM do.
+- On Windows, Node starts the adapter in a job object that terminates it
+  when `peerbit-fs mount` exits, and WinFsp removes the drive of a process
+  that exited, so the adapter adds no job object of its own.
+
+An adapter that is killed cannot unmount. Linux and macOS then keep a
+disconnected mount, which blocks the next mount there: on Linux a stat of the
+mountpoint fails with `ENOTCONN`; on macOS the adapter takes `ENXIO` or
+`ENOTCONN` from opening it as the same state (not yet checked against
+macFUSE in CI). The adapter mounts with the source name (fsname)
+`peerbit-shared-fs`, and on Linux also the subtype, so the mount table shows
+`type fuse.peerbit-shared-fs`. Before mounting, it unmounts a disconnected
+mount at its mountpoint only when the mount table shows a mount from
+`peerbit-shared-fs` of that type (macOS: `macfuse` or `osxfuse`) by the same
+user: on Linux with `fusermount3 -u` (or `fusermount`), then lazily with
+`-u -z`; on macOS with `unmount`, then a forced one. It leaves a live mount
+alone. At a disconnected mount it cannot prove an adapter of its user left, or
+fails to unmount, it says what it found, names the command to run, and does
+not mount.
+
+After the adapter exits other than with status 0 (it did not unmount), and
+not on Windows, `peerbit-fs mount` runs
+`peerbit-shared-fs-native --clear-dead-mount --mountpoint <path>` as the first
+step of its stop. That makes the same check and unmount, then exits: 0 when
+nothing is left to clear (it says when it unmounted), 1 with what it found and
+the command to run.
 
 ## POSIX metadata
 

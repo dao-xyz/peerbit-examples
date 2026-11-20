@@ -8,6 +8,7 @@ import (
 
 func TestNativeMountOptionsPerPlatform(t *testing.T) {
 	linuxCache := "entry_timeout=0.1,attr_timeout=0,negative_timeout=0"
+	linuxName := "fsname=peerbit-shared-fs,subtype=peerbit-shared-fs"
 	tests := []struct {
 		name  string
 		goos  string
@@ -26,17 +27,18 @@ func TestNativeMountOptionsPerPlatform(t *testing.T) {
 			want:  []string{"-s", "-o", "uid=-1,gid=-1", "-d"},
 		},
 		// The Linux kernel caches names for 0.1 s, never attributes or
-		// missing names.
-		{name: "linux", goos: "linux", want: []string{"-s", "-o", linuxCache}},
+		// missing names. The mount table lists the mount as
+		// "peerbit-shared-fs" of type fuse.peerbit-shared-fs.
+		{name: "linux", goos: "linux", want: []string{"-s", "-o", linuxCache, "-o", linuxName}},
 		{
 			name:  "linux debug",
 			goos:  "linux",
 			debug: true,
-			want:  []string{"-s", "-o", linuxCache, "-d"},
+			want:  []string{"-s", "-o", linuxCache, "-o", linuxName, "-d"},
 		},
-		// macFUSE keeps libfuse's defaults.
-		{name: "darwin", goos: "darwin", want: []string{"-s"}},
-		{name: "darwin debug", goos: "darwin", debug: true, want: []string{"-s", "-d"}},
+		// macFUSE keeps libfuse's defaults; the mount's source is named.
+		{name: "darwin", goos: "darwin", want: []string{"-s", "-o", "fsname=peerbit-shared-fs"}},
+		{name: "darwin debug", goos: "darwin", debug: true, want: []string{"-s", "-o", "fsname=peerbit-shared-fs", "-d"}},
 	}
 
 	for _, test := range tests {

@@ -21,7 +21,10 @@ import os from "node:os";
 import path from "node:path";
 import yargs from "yargs";
 import { hideBin, Parser } from "yargs/helpers";
-import { mountExternalNativeAdapter } from "./external-native-adapter.js";
+import {
+    mountExternalNativeAdapter,
+    reportAdapterExit,
+} from "./external-native-adapter.js";
 import {
     describeNativeAdapterInstall,
     installNativeAdapter,
@@ -458,11 +461,15 @@ const COPY_MS = 100;
 // Shutdown requests: SIGINT, SIGTERM, SIGBREAK, SIGHUP and a `shutdown` line
 // on a stdin that is not a terminal. The first runs `stop`. A copy is
 // ignored, with a hint; any other request aborts the persist-on-exit wait
-// while it runs, and otherwise exits at once.
+// while it runs, and otherwise exits at once, also once `stop` has settled
+// (the signal listeners stay until the process exits). `ended` settles when
+// the mount ends on its own (its adapter exited): that runs `stop` as a first
+// request does, unless one came first.
 export const waitForTermination = (
     stop: (shutdown: MountShutdown) => Promise<void>,
-    host: Pick<NodeJS.Process, "on" | "off" | "exit" | "uptime"> = process,
-    input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin
+    host: Pick<NodeJS.Process, "on" | "exit" | "uptime"> = process,
+    input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin,
+    ended?: Promise<unknown>
 ) =>
     new Promise<void>((resolve, reject) => {
         const abort = new AbortController();
@@ -492,7 +499,6 @@ export const waitForTermination = (
             stop(shutdown)
                 .finally(() => {
                     clearInterval(keepAlive);
-                    for (const name of signals) host.off(name, request);
                     input.off("data", onData).pause();
                 })
                 .then(resolve, reject);
@@ -503,7 +509,42 @@ export const waitForTermination = (
                 .forEach((line) => line.trim() === "shutdown" && request());
         for (const name of signals) host.on(name, request);
         if (!input.isTTY) input.on("data", onData);
+        void ended?.then(() => last < 0 && request(), ignore);
     });
+
+/**
+ * Exits with the exit code set once each stream has written what it holds.
+ * A stopped mount does not wait for the timers Peerbit's stop leaves, which
+ * kept it about a second longer.
+ */
+export const exitOnceFlushed = (
+    host: Pick<NodeJS.Process, "exit"> = process,
+    streams: NodeJS.WritableStream[] = [process.stdout, process.stderr]
+) => {
+    let pending = streams.length;
+    for (const stream of streams)
+        stream.write("", () => --pending || host.exit(process.exitCode ?? 0));
+};
+
+/**
+ * Exits once the mount's stop has settled, as exitOnceFlushed does. A stop
+ * that failed ran every step, then threw the first failure: that error is
+ * printed as one line, with exit code 1. Thrown on, it reached yargs, which
+ * printed the `mount` help and a stack trace.
+ */
+export const exitAfterStop = async (
+    stopped: Promise<void>,
+    host: Pick<NodeJS.Process, "exit"> = process,
+    streams?: NodeJS.WritableStream[]
+) => {
+    await stopped.catch((error: unknown) => {
+        process.exitCode = 1;
+        console.error(
+            chalk.red(error instanceof Error ? error.message : String(error))
+        );
+    });
+    exitOnceFlushed(host, streams);
+};
 
 /** Unacknowledged paths listed one per line; one more line counts the rest. */
 const LISTED_PATHS = 200;
@@ -1663,7 +1704,7 @@ export const createCliParser = (args: string[]) => {
                     .option("native-adapter", {
                         type: "string",
                         description:
-                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Bypasses the managed adapter's release pin and is not checked: use an adapter from this CLI's release (one from 0.13.15 or earlier mounts but fails every operation).",
+                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER. Bypasses the managed adapter's release pin and is not checked: use an adapter from this CLI's release (one from 0.13.15 or earlier mounts but fails every operation). A wrapper script should start the adapter with exec.",
                     })
                     .option("write-ready-timeout-ms", {
                         type: "number",
@@ -1774,6 +1815,8 @@ export const createCliParser = (args: string[]) => {
                     | undefined;
                 let profileWriter: SharedFsMountProfileWriter | undefined;
                 let fsHandle!: Awaited<ReturnType<typeof openCliFs>>;
+                // Settles, reported, if the adapter exits on its own.
+                let adapterExited: Promise<void> | undefined;
                 try {
                     const unreachable = await connectMountToNetwork(
                         peerbit,
@@ -1839,6 +1882,9 @@ export const createCliParser = (args: string[]) => {
                             ? {}
                             : { profileFile: nativeProfileFile }
                     );
+                    adapterExited = mounted.exited.then((exit) =>
+                        reportAdapterExit(exit)
+                    );
                     console.log(
                         chalk.green(
                             `Mounted ${fsHandle.address} at ${mounted.mountpoint}`
@@ -1864,15 +1910,25 @@ export const createCliParser = (args: string[]) => {
                     );
                     throw error;
                 }
-                await waitForTermination((shutdown) =>
-                    stopMountSession({
-                        mounted,
-                        ipc,
-                        backend,
-                        profileWriter,
-                        persist: () => persistOnExit(fsHandle, argv, shutdown),
-                        stopPeerbit: () => stopPeerbitForCli(peerbit),
-                    })
+                // An adapter that exits on its own ends the mount through the
+                // same stop as a shutdown request: drain, persist-on-exit and
+                // Peerbit's stop still run.
+                await exitAfterStop(
+                    waitForTermination(
+                        (shutdown) =>
+                            stopMountSession({
+                                mounted,
+                                ipc,
+                                backend,
+                                profileWriter,
+                                persist: () =>
+                                    persistOnExit(fsHandle, argv, shutdown),
+                                stopPeerbit: () => stopPeerbitForCli(peerbit),
+                            }),
+                        process,
+                        process.stdin,
+                        adapterExited
+                    )
                 );
             }
         )
@@ -2977,7 +3033,7 @@ export const createCliParser = (args: string[]) => {
         )
         .command(
             "unmount <mountpoint>",
-            "detach a native mountpoint (does not stop a separate mount process)",
+            "detach a native mountpoint; the mount process serving it then stops",
             (command) =>
                 command.positional("mountpoint", {
                     type: "string",
@@ -2991,7 +3047,7 @@ export const createCliParser = (args: string[]) => {
                 console.log(chalk.green(`Unmounted ${argv.mountpoint}`));
                 console.log(
                     chalk.yellow(
-                        "If peerbit-fs mount is still running, terminate that process separately and wait for it to exit."
+                        "The peerbit-fs mount process serving it stops as on Ctrl-C; wait for it to exit before opening its state directory."
                     )
                 );
             }
