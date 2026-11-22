@@ -765,15 +765,22 @@ describe("readiness reachability", () => {
             )) {
                 connection.abort(new Error("test: the connection dropped"));
             }
-            // R departs, then comes back; libp2p's connect arrives before the
-            // route is added again, so only the route table's own event
-            // (fanout's, on 5.4.10) re-reads R reachable.
-            await until(() => {
-                expect(reads).toContain(false);
+            // R departs: a re-read finds it unreachable.
+            await until(() => expect(reads).toContain(false));
+            // R comes back. Nothing here is sure to redial it: these bare
+            // peers host no fanout channel, and their only redial is one relay
+            // reservation attempt, which libp2p starts once J has identified R
+            // and which the drop can prevent or cut short. So J dials R again,
+            // as a mount's fanout channel would redial its bootstrap. libp2p's
+            // connect arrives before the route is added again, so only the
+            // route table's own event (fanout's, on 5.4.10) re-reads R
+            // reachable.
+            await jPeer.dial(rPeer);
+            await until(() =>
                 expect(reads.lastIndexOf(true)).toBeGreaterThan(
                     reads.indexOf(false)
-                );
-            });
+                )
+            );
             expect(isReachable(jPeer, J, R)).toBe(true);
             transport.dispose();
         });
